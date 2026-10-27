@@ -17,7 +17,17 @@ use crate::extract::{ExtractedFile, dir_mode};
 
 static HARDLINK_FAILED: AtomicBool = AtomicBool::new(false);
 
-pub fn materialize(src: &Path, files: &[ExtractedFile], dest: &Path, umask: u32, private: bool) -> io::Result<()> {
+/// `before_hard_link` runs once, before the first file is hard-linked from
+/// the store, so the store can record that this entry now shares inodes
+/// with a node_modules folder.
+pub fn materialize(
+    src: &Path,
+    files: &[ExtractedFile],
+    dest: &Path,
+    umask: u32,
+    private: bool,
+    before_hard_link: &dyn Fn() -> io::Result<()>,
+) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         if !dest.exists() && clone_tree(src, dest).is_ok() {
@@ -28,6 +38,7 @@ pub fn materialize(src: &Path, files: &[ExtractedFile], dest: &Path, umask: u32,
     create_dir(dest, dmode)?;
     let mut made: HashSet<PathBuf> = HashSet::new();
     made.insert(dest.to_path_buf());
+    let mut marked = false;
     for file in files {
         let target = dest.join(&file.path);
         if let Some(parent) = target.parent() {
@@ -35,6 +46,10 @@ pub fn materialize(src: &Path, files: &[ExtractedFile], dest: &Path, umask: u32,
         }
         let source = src.join(&file.path);
         if !private && !HARDLINK_FAILED.load(Ordering::Relaxed) {
+            if !marked {
+                before_hard_link()?;
+                marked = true;
+            }
             match fs::hard_link(&source, &target) {
                 Ok(()) => continue,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {

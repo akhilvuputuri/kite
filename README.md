@@ -1,61 +1,97 @@
 # lockstep
 
-A small, lockfile-exact JavaScript package installer and script runner, written in Rust.
-It reads and writes npm's own `package-lock.json` (lockfileVersion 3) and produces the same
-`node_modules` tree as `npm ci`, byte for byte.
+**A fast JavaScript package manager written in Rust that is a drop-in replacement for npm.**
 
-It exists to replace npm in [Chief](https://github.com/akhilvuputuri/chief-agent): its CI, Docker
-images, coding sandboxes and local development (see chief-agent issue #330). It is deliberately
-narrow. It is not a general npm replacement, and anything outside its scope fails loudly rather
-than falling back to npm.
+lockstep installs, resolves and runs JavaScript projects using npm's own `package-lock.json`.
+Unlike other npm alternatives, it does not convert your lockfile or build a "similar" tree.
+It produces **exactly** what npm 10 produces, byte for byte, and gets there faster.
+
+```sh
+lockstep ci                      # npm ci
+lockstep install                 # npm install
+lockstep install zod@^3 -D       # npm install zod@^3 --save-dev
+lockstep uninstall left-pad      # npm uninstall left-pad
+lockstep update [pkg...]         # npm update
+lockstep run build -- --watch    # npm run build -- --watch
+lockstep test                    # npm test
+lockstep exec tsc --noEmit       # npx tsc --noEmit
+```
+
+## Why lockstep
+
+- **Exactly npm's results.** The same `node_modules` tree, file for file and mode for mode.
+  The same `package-lock.json`, byte for byte. The same `package.json` edits. You can switch
+  a project, a CI pipeline or a single developer without touching the lockfile, and switch back
+  at any time.
+- **Fast.** Verified packages are kept extracted in a content-addressable store, so a warm
+  install clones (`clonefile` on macOS) or hard-links (Linux) files instead of unpacking
+  tarballs. Registry metadata is fetched in parallel and cached with HTTP revalidation.
+- **One self-contained binary.** No Node.js is needed to install lockstep itself, and it has no
+  runtime dependencies beyond the system C library. Release builds ship for Linux x64,
+  Linux arm64 and macOS arm64, each with a SHA-256 checksum.
+- **Strict integrity.** Every tarball is hashed against the lockfile's `integrity` as it streams
+  in, and its files only become a store entry once the whole tarball matched. Store entries that
+  were ever hard-linked into a project are checked (mode, size and modification time of every
+  file) before each reuse and re-downloaded if anything changed. This catches ordinary in-place
+  edits through `node_modules`; it is not a defence against someone deliberately rewriting a file
+  and restoring its timestamp. On macOS, packages are cloned copy-on-write instead, so edits in
+  `node_modules` cannot reach the store at all.
+
+## Proven compatibility
+
+Every change is checked against npm itself (npm 10.9.9, the npm in Node 22.23.4) on Linux x64,
+Linux arm64 and macOS:
+
+- **Installs.** `harness/parity.sh` installs a project with `npm ci` and with `lockstep ci`,
+  then diffs every path, file type, permission, symlink target and content hash, including
+  `node_modules/.package-lock.json`. The checks run with and without `--omit=dev` and
+  `--ignore-scripts`. They cover real projects built on Next.js, NestJS, Angular, Storybook,
+  Vite/React, webpack, Jest/Babel, Prisma, Express and ESLint, plus local `file:` packages and
+  CRLF/tab-formatted manifests. The result is zero differences.
+- **Resolution.** `harness/resolve-parity.sh` runs the same command with
+  `npm ... --package-lock-only` and with lockstep, then diffs `package-lock.json` and
+  `package.json`. It covers fresh resolutions, no-op installs, adds (prod, dev, exact, tags,
+  ranges, peer-heavy packages), uninstalls and updates. The result is identical output, and
+  identical `ERESOLVE` refusals where npm refuses.
+- **Semantics.** `harness/fuzz.mjs` compares lockstep's semver engine with node-semver and its
+  key ordering with Node's ICU collator, over tens of thousands of random cases.
+
+lockstep follows npm down to its quirks: arborist's placement and peer-set rules, the
+order-dependent dev/optional flag calculation, pacote's file modes and `.gitignore` renaming,
+bin-links' conflict order and CRLF shebang fix, the lifecycle script phases, and the validation
+`npm ci` uses to reject an out-of-sync lockfile.
 
 ## Commands
 
-```
-lockstep [--prefix DIR] ci [--omit=dev|optional|peer]... [--ignore-scripts]
-lockstep [--prefix DIR] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
-lockstep [--prefix DIR] test [args...]
-lockstep exec <bin> [--] [args...]
-```
+| Command | Does |
+| --- | --- |
+| `ci [--omit=dev\|optional\|peer] [--ignore-scripts]` | Clean install from `package-lock.json`, refusing if it is out of sync with `package.json` |
+| `install [pkg[@spec]...] [-D\|-O\|-P\|--save-peer] [-E] [--lockfile-only]` | Resolve, update `package.json` and `package-lock.json`, then install |
+| `uninstall <pkg>... [--lockfile-only]` | Remove dependencies and prune what only they needed |
+| `update [pkg...] [--lockfile-only]` | Re-resolve within the ranges in `package.json` |
+| `run <script> [--] [args...]` | Run a `package.json` script with npm's environment, `PATH`, pre/post scripts and exit codes |
+| `test`, `start` | Shortcuts for `run test` and `run start` |
+| `exec <bin> [--] [args...]` | Run a binary from `node_modules/.bin` |
 
-- **`ci`** installs exactly what `package-lock.json` describes. It verifies each tarball's
-  `integrity` before unpacking anything, and keeps verified, extracted packages in a
-  content-addressable store (`$LOCKSTEP_STORE`, or the user cache directory), so a warm install
-  links files instead of unpacking tarballs: `clonefile` on macOS, hard links on Linux.
-- **`run`** runs a `package.json` script through `sh -c` with npm's environment, `PATH`, banner,
-  pre/post scripts, exit codes and signal handling.
-- **`exec`** runs a binary from the nearest `node_modules/.bin`. It never downloads anything.
+Global options: `--prefix DIR` (or `-C DIR`), `--store DIR` (default `$LOCKSTEP_STORE` or the
+user cache directory), `--jobs N`, `--quiet`. `install` also takes `--before DATE`.
 
-## Compatibility with npm
+## Roadmap
 
-`harness/parity.sh` installs a fixture with `npm ci` and with `lockstep ci` and diffs every path,
-file type, mode, symlink target and content hash. CI runs it for each fixture on Linux x64,
-Linux arm64 and macOS arm64, with and without `--omit=dev` and `--ignore-scripts`, against the npm
-bundled with Node 22.23.4 (npm 10.9.9).
+These are not supported yet. When a project needs one, lockstep says so clearly instead of
+guessing:
 
-Behaviour follows npm's source:
+- workspaces and `overrides`;
+- registries other than registry.npmjs.org, and `.npmrc` settings;
+- git, tarball-URL and `file:` tarball dependencies;
+- packages that ship `bundleDependencies` or `npm-shrinkwrap.json`;
+- `publish`, `audit` and other npm commands outside install and run.
 
-- Only file entries of a tarball are written, with mode `(mode | 0o666) & ~umask`; directories
-  are `0o777 & ~umask`. `.gitignore` becomes `.npmignore` the way pacote does it.
-- Bins come from the lockfile entry and are linked into the `.bin` of the `node_modules` folder
-  that holds the package. The first claim wins (depth, then ICU path order), and targets are made
-  executable with their CRLF shebang fixed, as bin-links does.
-- Platform and engines checks apply to optional packages only; a failing optional package is
-  removed with everything only it needed (arborist's `optionalSet`).
-- `--omit` applies only under the root `node_modules`; a linked local package's dependencies are
-  always installed, as npm does.
-- `node_modules/.package-lock.json` is rebuilt with arborist's field list and key order.
-- Install scripts run as in arborist's rebuild: `preinstall` for all packages, then bin links,
-  then `install`, then `postinstall`; then the root's lifecycle scripts.
+## Notes
 
-Known differences, by design:
-
-- Only `https://registry.npmjs.org/` tarballs and `file:` links are supported. Bundled
-  dependencies, `npm-shrinkwrap.json`, git and tarball-URL sources fail with a clear error.
-- `lockstep run` passes every argument after the script name to the script; npm swallows
-  dash-arguments before `--` as its own config.
-- `lockstep exec` runs the binary directly, without a shell, so arguments are never globbed.
-- npm's own `npm_config_*` variables are not set for scripts.
+- `lockstep exec` runs the binary directly instead of through a shell, so arguments are passed
+  exactly as given and never globbed.
+- `lockstep run x --flag` passes `--flag` to the script. npm would treat it as its own option.
 
 ## License
 

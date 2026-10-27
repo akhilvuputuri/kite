@@ -3,14 +3,14 @@ name = "lockstep"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "A lockfile-exact JavaScript package installer and script runner, compatible with npm's package-lock.json"
+description = "A fast, npm-compatible JavaScript package manager: install, resolve and run with byte-identical npm results"
 license = "MIT"
 repository = "https://github.com/akhilvuputuri/lockstep"
 publish = false
 
 [dependencies]
 base64 = "0.22"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }

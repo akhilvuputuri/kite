@@ -41,16 +41,111 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
-      - run: cargo build --locked --release
+      - name: Build the release binary (static musl on Linux)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
       - name: npm ci vs lockstep ci
         env:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
           LOCKSTEP_STORE: ${{ runner.temp }}/lockstep-store
           PARITY_WORK: ${{ runner.temp }}/parity
         run: |
-          npm --version
+          npm --version | grep -qx '10\.9\.[0-9]*' || { echo "expected npm 10.9.x, got $(npm --version)"; exit 1; }
           # shellcheck disable=SC2086
-          harness/parity.sh tests/fixtures/${{ matrix.fixture }} target/release/lockstep ${{ matrix.flags }}
+          harness/parity.sh tests/fixtures/${{ matrix.fixture }} "$BIN" ${{ matrix.flags }}
       - name: Show the difference
         if: failure()
         run: head -200 "${{ runner.temp }}/parity/${{ matrix.fixture }}.diff" || true
+
+  resolve:
+    name: npm resolution parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
+      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      PARITY_WORK: ${{ github.workspace }}/../resolve-parity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Build the release binary (static musl on Linux)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - name: Differential fuzzing (node-semver, ICU collation)
+        run: node harness/fuzz.mjs "$BIN" 50000
+      - name: Resolve like npm install --package-lock-only
+        run: |
+          set -u
+          L=$BIN
+          R=harness/resolve-parity.sh
+          F=tests/fixtures
+          failed=0
+          run() { "$R" "$@" || failed=1; }
+          run $F/chief $L noop-chief install
+          run $F/pi $L noop-pi install
+          RESOLVE_DROP_LOCK=1 run $F/chief $L fresh-chief install
+          RESOLVE_DROP_LOCK=1 run $F/pi $L fresh-pi install
+          run $F/chief $L add-prod install left-pad
+          run $F/chief $L add-dev install -D @types/lodash
+          run $F/chief $L add-exact install -E is-odd@2
+          run $F/chief $L add-tag install semver@latest
+          run $F/chief $L add-range install 'zod@^3.20.0'
+          run $F/chief $L add-existing install grammy
+          run $F/chief $L add-peers install react-dom@18
+          run $F/chief $L uninstall uninstall pg dotenv
+          run $F/chief $L update-one update zod
+          run $F/pi $L update-all update
+          for d in $F/resolve/*/; do
+            name=$(basename "$d")
+            [ "$name" = bundled ] && continue
+            run "$d" $L "fresh-$name" install
+          done
+          run $F/resolve/minified $L add-minified install left-pad
+          run $F/resolve/tabs-crlf $L add-tabs install -D ms
+          exit $failed
+      - name: Refuse what is out of scope
+        run: |
+          cp -R tests/fixtures/resolve/bundled "$RUNNER_TEMP/bundled"
+          if "$BIN" -C "$RUNNER_TEMP/bundled" install --lockfile-only 2>err.txt; then
+            echo "expected bundleDependencies to be refused"; exit 1
+          fi
+          grep -q "bundleDependencies are not supported" err.txt
+      - name: Show differences
+        if: failure()
+        run: for f in "$PARITY_WORK"/*.diff; do [ -s "$f" ] && { echo "== $f"; head -80 "$f"; }; done; true
+
+  install-generated:
+    name: npm ci parity on generated lockfiles (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
+      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      PARITY_WORK: ${{ github.workspace }}/../install-parity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Build the release binary (static musl on Linux)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - name: Lock each fixture with npm, then compare npm ci and lockstep ci
+        run: |
+          failed=0
+          for d in tests/fixtures/resolve/*/; do
+            name=$(basename "$d")
+            [ "$name" = bundled ] && continue
+            fx="$RUNNER_TEMP/fixtures/$name"
+            mkdir -p "$fx" && cp -R "$d". "$fx"
+            (cd "$fx" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund --loglevel=error)
+            harness/parity.sh "$fx" "$BIN" || failed=1
+            harness/parity.sh "$fx" "$BIN" --omit=dev --ignore-scripts || failed=1
+          done
+          exit $failed
+      - name: Show differences
+        if: failure()
+        run: for f in "$PARITY_WORK"/*.diff; do [ -s "$f" ] && { echo "== $f"; head -80 "$f"; }; done; true

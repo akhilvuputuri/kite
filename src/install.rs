@@ -47,13 +47,19 @@ pub struct CiOptions {
     pub quiet: bool,
 }
 
+/// The process umask, read once: reading it means setting it, which must
+/// not race with threads creating files.
 pub fn current_umask() -> u32 {
-    // SAFETY: umask has no failure mode; set it back immediately.
-    unsafe {
-        let old = libc::umask(0o022);
-        libc::umask(old);
-        old as u32
-    }
+    static UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UMASK.get_or_init(|| {
+        // SAFETY: umask has no failure mode; it is set back immediately,
+        // and the first call happens in main before any worker starts.
+        unsafe {
+            let old = libc::umask(0o022);
+            libc::umask(old);
+            old as u32
+        }
+    })
 }
 
 pub fn read_manifest(dir: &Path) -> Result<Map<String, Value>, String> {
@@ -64,46 +70,6 @@ pub fn read_manifest(dir: &Path) -> Result<Map<String, Value>, String> {
         Ok(_) => Err(format!("{} is not a JSON object", path.display())),
         Err(e) => Err(format!("{}: invalid JSON: {e}", path.display())),
     }
-}
-
-const DEP_FIELDS: [&str; 4] = [
-    "dependencies",
-    "devDependencies",
-    "optionalDependencies",
-    "peerDependencies",
-];
-
-/// npm ci refuses to install when package.json and the lockfile disagree.
-/// The lockfile's root entry records the dependency specs it was built
-/// from; they must match package.json exactly.
-fn check_in_sync(manifest: &Map<String, Value>, root: &Entry) -> Result<(), String> {
-    for field in DEP_FIELDS {
-        let want = manifest.get(field).and_then(Value::as_object);
-        let have = root.raw.get(field).and_then(Value::as_object);
-        let empty = Map::new();
-        let want = want.unwrap_or(&empty);
-        let have = have.unwrap_or(&empty);
-        let mut problems = Vec::new();
-        for (name, spec) in want {
-            match have.get(name) {
-                Some(s) if s == spec => {}
-                Some(s) => problems.push(format!("{name}: package.json has {spec}, lockfile has {s}")),
-                None => problems.push(format!("{name}@{spec} is missing from the lockfile")),
-            }
-        }
-        for name in have.keys() {
-            if !want.contains_key(name) {
-                problems.push(format!("{name} is in the lockfile but not in package.json"));
-            }
-        }
-        if !problems.is_empty() {
-            return Err(format!(
-                "package.json and package-lock.json are not in sync ({field}):\n  {}\nRun `lockstep install` to update the lockfile.",
-                problems.join("\n  ")
-            ));
-        }
-    }
-    Ok(())
 }
 
 struct Plan {
@@ -122,6 +88,19 @@ fn node_version() -> Option<semver::Version> {
 }
 
 fn engines_ok(e: &Entry, node: &mut Option<Option<semver::Version>>) -> bool {
+    // npm checks engines.npm against its own version too.
+    if let Some(npm) = e.raw.get("engines").and_then(|v| v.get("npm")).and_then(Value::as_str) {
+        let ok = match (
+            semver::Range::parse(npm),
+            semver::Version::parse(crate::resolve::NPM_VERSION),
+        ) {
+            (Some(r), Some(v)) => r.satisfies_including_prerelease(&v),
+            _ => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
     let Some(range) = e.raw.get("engines").and_then(|v| v.get("node")).and_then(Value::as_str) else {
         return true;
     };
@@ -229,11 +208,34 @@ fn link_target<'a>(lock: &'a Lockfile, e: &Entry) -> Option<&'a Entry> {
 
 pub fn ci(opts: &CiOptions) -> Result<(), String> {
     let started = Instant::now();
+    let timing = std::env::var_os("LOCKSTEP_TIMING").is_some();
+    let mut last = Instant::now();
+    let mut mark = |label: &str| {
+        if timing {
+            eprintln!(
+                "lockstep: {label:<14} {:>7.1} ms",
+                last.elapsed().as_secs_f64() * 1000.0
+            );
+            last = Instant::now();
+        }
+    };
     let dir = &opts.dir;
     let manifest = read_manifest(dir)?;
-    let lock = Lockfile::read(&dir.join("package-lock.json"))?;
-    let root = lock.root().ok_or("lockfile has no root entry (\"\")")?;
-    check_in_sync(&manifest, root)?;
+    let mut lock = Lockfile::read(&dir.join("package-lock.json"))?;
+    lock.root().ok_or("lockfile has no root entry (\"\")")?;
+    // npm ci's ideal tree decides validity and the dependency flags.
+    let ideal = crate::resolve::ci_ideal_flags(dir, &lock, &opts.store)?;
+    // Extraneous lockfile entries are pruned from the ideal tree, so they
+    // are not installed.
+    lock.entries.retain(|e| e.is_root() || ideal.contains_key(&e.path));
+    for e in &mut lock.entries {
+        if let Some(f) = ideal.get(&e.path) {
+            e.dev = f.dev;
+            e.optional = f.optional;
+            e.dev_optional = f.dev_optional;
+            e.peer = f.peer;
+        }
+    }
     for e in &lock.entries {
         if e.is_root() || !e.in_node_modules() || e.link {
             continue;
@@ -262,12 +264,13 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
         }
     }
 
+    mark("validate");
     let platform = Platform::current();
     let umask = current_umask();
     let mut plan = plan(&lock, &opts.omit, &platform)?;
     let store = Store::new(opts.store.clone(), umask);
 
-    // Fetch and verify every package before touching node_modules.
+    // Every package to fetch, by integrity.
     let mut unique: Vec<(Integrity, String)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut integrity_of: HashMap<usize, Integrity> = HashMap::new();
@@ -283,16 +286,9 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
         }
         integrity_of.insert(i, integrity);
     }
-    let fetch_jobs = (opts.jobs * 4).clamp(8, 64);
-    let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
-        store.ensure(integrity, url).map(|p| (integrity.store_key(), p))
-    })?;
-    let downloaded = stored.iter().filter(|(_, p)| p.downloaded).count();
-    let stored: HashMap<String, crate::store::StoredPackage> = stored.into_iter().collect();
-
-    // npm ci empties the root node_modules (keeping the folder itself).
-    // Link targets' node_modules are not emptied; their packages are
-    // replaced one by one below.
+    // npm ci empties the root node_modules (keeping the folder itself)
+    // once the lockfile is validated. Link targets' node_modules are not
+    // emptied; their packages are replaced one by one.
     let root_nm = dir.join("node_modules");
     remove_contents(&root_nm).map_err(|e| format!("removing {}: {e}", root_nm.display()))?;
     link::mkdirp(&root_nm, umask).map_err(|e| format!("{}: {e}", root_nm.display()))?;
@@ -326,11 +322,67 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
             link::mkdirp(&parent, umask).map_err(|err| format!("{}: {err}", parent.display()))?;
         }
     }
+    mark("clear");
 
-    // Place packages, shallowest first so nested ones land inside their parents.
+    let place = |i: usize, pkg: Option<&crate::store::StoredPackage>| -> Result<(), String> {
+        let e = &lock.entries[i];
+        let dest = dir.join(&e.path);
+        if let Some(parent) = dest.parent() {
+            link::mkdirp(parent, umask).map_err(|err| format!("{}: {err}", parent.display()))?;
+        }
+        remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+        if e.link {
+            let target_abs = dir.join(e.resolved.as_deref().unwrap_or_default());
+            let rel = relative_path(dest.parent().unwrap_or(dir), &target_abs);
+            std::os::unix::fs::symlink(&rel, &dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+            return Ok(());
+        }
+        let pkg = pkg.expect("registry packages are stored before placing");
+        link::materialize(&pkg.dir, &pkg.files, &dest, umask, e.has_install_script, &|| {
+            crate::store::mark_linked(&pkg.dir)
+        })
+        .map_err(|err| format!("{}: {err}", e.path))
+    };
+
+    // Download, verify and store each package; a package directly under a
+    // node_modules root is placed as soon as its store entry exists, while
+    // nested ones wait for their parents.
+    let mut locations: HashMap<String, Vec<usize>> = HashMap::new();
+    for (&i, integrity) in &integrity_of {
+        locations.entry(integrity.store_key()).or_default().push(i);
+    }
+    let fetch_jobs = (opts.jobs * 4).clamp(16, 48);
+    let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
+        let key = integrity.store_key();
+        let pkg = store.ensure(integrity, url)?;
+        for &i in locations.get(&key).map(Vec::as_slice).unwrap_or_default() {
+            if depth(&lock.entries[i].path) == 1 {
+                place(i, Some(&pkg))?;
+            }
+        }
+        Ok::<_, String>((key, pkg))
+    })?;
+    if timing {
+        use std::sync::atomic::Ordering::Relaxed;
+        eprintln!(
+            "lockstep:   (thread time: download+unpack {} ms, {} MB, {} store entries replaced)",
+            crate::store::DOWNLOAD_US.load(Relaxed) / 1000,
+            crate::store::BYTES.load(Relaxed) / 1_000_000,
+            crate::store::TAMPERED.load(Relaxed)
+        );
+    }
+    mark("fetch+store");
+    let downloaded = stored.iter().filter(|(_, p)| p.downloaded).count();
+    let stored: HashMap<String, crate::store::StoredPackage> = stored.into_iter().collect();
+
+    // Links and nested packages, shallowest first.
     let mut by_depth: Vec<Vec<usize>> = Vec::new();
     for &i in &plan.install {
-        let d = depth(&lock.entries[i].path);
+        let e = &lock.entries[i];
+        let d = depth(&e.path);
+        if d == 1 && !e.link {
+            continue;
+        }
         if by_depth.len() <= d {
             by_depth.resize(d + 1, Vec::new());
         }
@@ -340,25 +392,13 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
         if level.is_empty() {
             continue;
         }
-        pool::map(level, opts.jobs * 2, |&i| -> Result<(), String> {
-            let e = &lock.entries[i];
-            let dest = dir.join(&e.path);
-            if let Some(parent) = dest.parent() {
-                link::mkdirp(parent, umask).map_err(|err| format!("{}: {err}", parent.display()))?;
-            }
-            remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
-            if e.link {
-                let target_abs = dir.join(e.resolved.as_deref().unwrap_or_default());
-                let rel = relative_path(dest.parent().unwrap_or(dir), &target_abs);
-                std::os::unix::fs::symlink(&rel, &dest).map_err(|err| format!("{}: {err}", dest.display()))?;
-                return Ok(());
-            }
-            let pkg = &stored[&integrity_of[&i].store_key()];
-            link::materialize(&pkg.dir, &pkg.files, &dest, umask, e.has_install_script)
-                .map_err(|err| format!("{}: {err}", e.path))
+        pool::map(level, opts.jobs * 2, |&i| {
+            let pkg = integrity_of.get(&i).map(|k| &stored[&k.store_key()]);
+            place(i, pkg)
         })?;
     }
 
+    mark("place");
     // Build: rebuild.js runs registry dependencies first, then links.
     let ctx = scripts::Context {
         command: "ci",
@@ -467,6 +507,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
         failed.extend(scripts::run_phase(&link_nodes, "postinstall", &ctx)?);
     }
 
+    mark("bins+scripts");
     // A failed optional package is removed with everything only it needed.
     if !failed.is_empty() {
         let graph = Graph::build(&lock.entries);
@@ -488,6 +529,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
 
     write_hidden_lockfile(dir, &lock, &plan).map_err(|e| format!("writing node_modules/.package-lock.json: {e}"))?;
 
+    mark("hidden-lock");
     if !opts.ignore_scripts {
         if !plan.install.is_empty() {
             scripts::run_root(

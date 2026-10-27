@@ -5,13 +5,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::json::Style;
-
 #[derive(Clone, Debug, Default)]
 pub struct Entry {
     /// Location relative to the project root, e.g. `node_modules/a/node_modules/b`.
     pub path: String,
-    pub name: Option<String>,
     pub version: Option<String>,
     pub resolved: Option<String>,
     pub integrity: Option<String>,
@@ -23,7 +20,6 @@ pub struct Entry {
     pub os: Vec<String>,
     pub cpu: Vec<String>,
     pub libc: Vec<String>,
-    pub bin: Vec<(String, String)>,
     pub has_install_script: bool,
     pub in_bundle: bool,
     pub has_shrinkwrap: bool,
@@ -61,7 +57,6 @@ pub fn location_name(path: &str) -> &str {
 #[derive(Clone, Debug)]
 pub struct Lockfile {
     pub raw: Map<String, Value>,
-    pub style: Style,
     pub entries: Vec<Entry>,
 }
 
@@ -72,7 +67,6 @@ impl Lockfile {
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
-        let style = Style::detect(text);
         let value: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
         let Value::Object(raw) = value else {
             return Err("lockfile is not a JSON object".into());
@@ -97,7 +91,7 @@ impl Lockfile {
                 .ok_or_else(|| format!("packages[{path:?}] is not an object"))?;
             entries.push(parse_entry(path, obj)?);
         }
-        Ok(Lockfile { raw, style, entries })
+        Ok(Lockfile { raw, entries })
     }
 
     pub fn root(&self) -> Option<&Entry> {
@@ -132,16 +126,8 @@ fn parse_entry(path: &str, obj: &Map<String, Value>) -> Result<Entry, String> {
     if path.split('/').any(|part| part == ".." || part == ".") || path.starts_with('/') {
         return Err(format!("unsafe package location {path:?}"));
     }
-    let bin = match obj.get("bin") {
-        Some(Value::Object(map)) => map
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
-            .collect(),
-        _ => Vec::new(),
-    };
     Ok(Entry {
         path: path.to_string(),
-        name: text(obj, "name"),
         version: text(obj, "version"),
         resolved: text(obj, "resolved"),
         integrity: text(obj, "integrity"),
@@ -153,7 +139,6 @@ fn parse_entry(path: &str, obj: &Map<String, Value>) -> Result<Entry, String> {
         os: strings(obj, "os"),
         cpu: strings(obj, "cpu"),
         libc: strings(obj, "libc"),
-        bin,
         has_install_script: flag(obj, "hasInstallScript"),
         in_bundle: flag(obj, "inBundle"),
         has_shrinkwrap: flag(obj, "hasShrinkwrap"),

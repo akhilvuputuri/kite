@@ -1,9 +1,6 @@
-// The resolver (next milestone) uses the semver and lockfile fields that
-// `ci` does not need yet.
-#![allow(dead_code)]
-
 mod bins;
 mod collate;
+mod config;
 mod extract;
 mod fetch;
 mod graph;
@@ -15,6 +12,7 @@ mod lockfile;
 mod lockmeta;
 mod platform;
 mod pool;
+mod resolve;
 mod run;
 mod scripts;
 mod semver;
@@ -28,6 +26,9 @@ lockstep — install and run JavaScript packages from package-lock.json
 
 Usage:
   lockstep [options] ci [--omit=dev|optional|peer]... [--ignore-scripts]
+  lockstep [options] install [pkg[@spec]...] [-D|-O|-P|--save-peer] [-E] [--lockfile-only]
+  lockstep [options] uninstall <pkg>... [--lockfile-only]
+  lockstep [options] update [pkg...] [--lockfile-only]
   lockstep [options] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
   lockstep [options] test [args...]        (also: start)
   lockstep [options] exec <bin> [--] [args...]
@@ -72,6 +73,7 @@ fn global_option(g: &mut Global, arg: &str, rest: &mut std::vec::IntoIter<String
 }
 
 fn real_main() -> Result<u8, String> {
+    install::current_umask();
     let mut args = std::env::args().skip(1).collect::<Vec<_>>().into_iter();
     let mut g = Global::default();
     let command = loop {
@@ -101,6 +103,8 @@ fn real_main() -> Result<u8, String> {
     match command.as_str() {
         "ci" | "clean-install" => {
             let mut omit = install::Omit::default();
+            let mut include = (false, false, false);
+            let mut production = false;
             let mut ignore_scripts = false;
             while let Some(arg) = args.next() {
                 if global_option(&mut g, &arg, &mut args)? {
@@ -115,17 +119,119 @@ fn real_main() -> Result<u8, String> {
                             return Err(format!("--omit={other} is not supported (dev, optional, peer)"));
                         }
                     },
+                    "--include" => match value(&arg, &mut args)?.as_str() {
+                        "dev" => include.0 = true,
+                        "optional" => include.1 = true,
+                        "peer" => include.2 = true,
+                        "prod" => {}
+                        other => return Err(format!("--include={other} is not supported")),
+                    },
+                    "--production" => production = true,
                     "--ignore-scripts" => ignore_scripts = true,
                     _ => return Err(format!("unknown argument {arg:?} for ci")),
                 }
             }
+            let dir = project_dir(&g)?;
+            let mut cli = config::Cli::default();
+            for (on, name) in [(omit.dev, "dev"), (omit.optional, "optional"), (omit.peer, "peer")] {
+                if on {
+                    cli.omit.push(name.into());
+                }
+            }
+            for (on, name) in [(include.0, "dev"), (include.1, "optional"), (include.2, "peer")] {
+                if on {
+                    cli.include.push(name.into());
+                }
+            }
+            cli.production = production;
+            let cfg = config::Config::load(&dir, &cli)?;
             install::ci(&install::CiOptions {
-                dir: project_dir(&g)?,
-                omit,
-                ignore_scripts,
+                dir,
+                omit: install::Omit {
+                    dev: cfg.omit_dev,
+                    optional: cfg.omit_optional,
+                    peer: cfg.omit_peer,
+                },
+                ignore_scripts: ignore_scripts || cfg.ignore_scripts,
                 store: g.store.clone().unwrap_or_else(store::Store::default_root),
                 jobs: g.jobs.unwrap_or_else(pool::default_jobs),
                 quiet: g.quiet,
+            })?;
+            Ok(0)
+        }
+        "install" | "i" | "add" | "uninstall" | "remove" | "rm" | "un" | "r" | "update" | "up" | "upgrade" => {
+            let mode = match command.as_str() {
+                "install" | "i" | "add" => "install",
+                "update" | "up" | "upgrade" => "update",
+                _ => "uninstall",
+            };
+            let mut omit = install::Omit::default();
+            let mut ignore_scripts = false;
+            let mut lockfile_only = false;
+            let mut save_type = None;
+            let mut save_exact = false;
+            let mut before = None;
+            let mut names: Vec<String> = Vec::new();
+            while let Some(arg) = args.next() {
+                if global_option(&mut g, &arg, &mut args)? {
+                    continue;
+                }
+                match arg.split('=').next().unwrap_or("") {
+                    "--omit" => match value(&arg, &mut args)?.as_str() {
+                        "dev" => omit.dev = true,
+                        "optional" => omit.optional = true,
+                        "peer" => omit.peer = true,
+                        other => {
+                            return Err(format!("--omit={other} is not supported (dev, optional, peer)"));
+                        }
+                    },
+                    "--ignore-scripts" => ignore_scripts = true,
+                    "--lockfile-only" | "--package-lock-only" => lockfile_only = true,
+                    "-D" | "--save-dev" => save_type = Some(resolve::SaveType::Dev),
+                    "-O" | "--save-optional" => save_type = Some(resolve::SaveType::Optional),
+                    "-P" | "--save-prod" => save_type = Some(resolve::SaveType::Prod),
+                    "--save-peer" => save_type = Some(resolve::SaveType::Peer),
+                    "-E" | "--save-exact" => save_exact = true,
+                    "--before" => before = Some(value(&arg, &mut args)?),
+                    _ if arg.starts_with('-') => return Err(format!("unknown option {arg:?} for {command}")),
+                    _ => names.push(arg),
+                }
+            }
+            if mode == "uninstall" && names.is_empty() {
+                return Err("uninstall needs at least one package name".into());
+            }
+            if mode == "update" && names.iter().any(|n| n.chars().skip(1).any(|c| c == '@')) {
+                return Err("update takes package names only; use install name@spec to change a range".into());
+            }
+            let dir = project_dir(&g)?;
+            let mut cli = config::Cli::default();
+            for (on, name) in [(omit.dev, "dev"), (omit.optional, "optional"), (omit.peer, "peer")] {
+                if on {
+                    cli.omit.push(name.into());
+                }
+            }
+            let cfg = config::Config::load(&dir, &cli)?;
+            let save_exact = save_exact || cfg.save_exact;
+            resolve::run(resolve::ResolveOptions {
+                ci: install::CiOptions {
+                    dir,
+                    omit: install::Omit {
+                        dev: cfg.omit_dev,
+                        optional: cfg.omit_optional,
+                        peer: cfg.omit_peer,
+                    },
+                    ignore_scripts: ignore_scripts || cfg.ignore_scripts,
+                    store: g.store.clone().unwrap_or_else(store::Store::default_root),
+                    jobs: g.jobs.unwrap_or_else(pool::default_jobs),
+                    quiet: g.quiet,
+                },
+                add: if mode == "install" { names.clone() } else { Vec::new() },
+                save_type,
+                save_exact,
+                rm: if mode == "uninstall" { names.clone() } else { Vec::new() },
+                update: if mode == "update" { Some(names) } else { None },
+                lockfile_only,
+                before,
             })?;
             Ok(0)
         }
@@ -207,6 +313,44 @@ fn real_main() -> Result<u8, String> {
             }
             let bin = bin.ok_or("exec needs a bin name")?;
             run::exec_bin(&project_dir(&g)?, &bin, &rest)
+        }
+        // Differential testing hooks for harness/fuzz.mjs (not part of the CLI).
+        "__debug" => {
+            use std::io::{BufRead, Write};
+            let mode = args.next().unwrap_or_default();
+            let stdin = std::io::stdin();
+            let mut out = std::io::BufWriter::new(std::io::stdout());
+            let mut lines: Vec<String> = Vec::new();
+            for line in stdin.lock().lines() {
+                lines.push(line.map_err(|e| e.to_string())?);
+            }
+            match mode.as_str() {
+                "satisfies" => {
+                    for line in &lines {
+                        let (range, version) = line.split_once('\t').unwrap_or((line, ""));
+                        let result = match (semver::Range::parse(range), semver::Version::parse(version)) {
+                            (Some(r), Some(v)) => {
+                                if r.satisfies(&v) {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            (None, _) => "invalid-range",
+                            (_, None) => "invalid-version",
+                        };
+                        writeln!(out, "{result}").map_err(|e| e.to_string())?;
+                    }
+                }
+                "collate" => {
+                    lines.sort_by(|a, b| collate::compare(a, b));
+                    for line in &lines {
+                        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+                    }
+                }
+                other => return Err(format!("unknown __debug mode {other:?}")),
+            }
+            Ok(0)
         }
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }

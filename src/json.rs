@@ -49,6 +49,24 @@ impl Style {
     }
 }
 
+/// Writes through a temporary file and a rename, like write-file-atomic,
+/// keeping the existing file's permissions.
+pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    // Like write-file-atomic, replace the file a symlink points to.
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = real.as_path();
+    let tmp = path.with_file_name(format!(
+        ".{}.lockstep-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, data)?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 pub fn stringify(value: &Value, style: &Style) -> String {
     let mut out = Vec::new();
     if style.indent.is_empty() {
