@@ -1,0 +1,40 @@
+{
+  "name": "@chief-agent/pi-runtime",
+  "version": "0.1.6",
+  "private": true,
+  "type": "module",
+  "description": "Independent Pi-based learn, plan and approved-build runtime",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./report": "./dist/report.js",
+    "./terminal-http-recovery": "./dist/terminal-http-recovery.js"
+  },
+  "bin": {
+    "pi-runtime": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "native",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run build && npm test",
+    "format:check": "prettier --check src tests README.md package.json tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "typescript": "5.8.3",
+    "tsx": "4.20.6",
+    "prettier": "3.9.6"
+  }
+}
