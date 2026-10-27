@@ -1,0 +1,8 @@
+{
+  "name": "link-local",
+  "version": "1.0.0",
+  "dependencies": {
+    "util-pkg": "file:./packages/util",
+    "is-number": "^7.0.0"
+  }
+}

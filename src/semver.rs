@@ -271,12 +271,17 @@ fn lt(v: Version) -> Comparator {
 }
 
 impl Range {
+    /// node-semver `new Range(text, { loose: true })`. Sets in which no
+    /// comparator parses are dropped; the range is invalid only when every
+    /// set is dropped.
     pub fn parse(text: &str) -> Option<Range> {
         let mut sets = Vec::new();
         for alt in text.split("||") {
-            sets.push(parse_set(alt.trim())?);
+            if let Some(set) = parse_set(alt.trim()) {
+                sets.push(set);
+            }
         }
-        Some(Range { sets })
+        if sets.is_empty() { None } else { Some(Range { sets }) }
     }
 
     pub fn satisfies(&self, v: &Version) -> bool {
@@ -292,10 +297,6 @@ impl Range {
             None => false,
             Some(comps) => comps.iter().all(|c| c.test(v)),
         })
-    }
-
-    pub fn max_satisfying<'a, I: IntoIterator<Item = &'a Version>>(&self, versions: I) -> Option<&'a Version> {
-        versions.into_iter().filter(|v| self.satisfies(v)).max()
     }
 }
 
@@ -343,16 +344,41 @@ fn parse_set(text: &str) -> Option<Set> {
     // Hyphen range: `a - b` with spaces around the hyphen.
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() == 3 && words[1] == "-" {
-        return hyphen(words[0], words[2]);
+        return hyphen(words[0], words[2]).map(|set| set.map(drop_gte0));
     }
     let mut comps = Vec::new();
+    let mut parsed_any = false;
+    let mut never = false;
     for token in tokens(text) {
-        match parse_comparator(&token)? {
-            None => return Some(None),
-            Some(mut c) => comps.append(&mut c),
+        // Loose mode silently drops comparators that do not parse.
+        match parse_comparator(&token) {
+            None => {}
+            Some(None) => {
+                parsed_any = true;
+                never = true;
+            }
+            Some(Some(mut c)) => {
+                parsed_any = true;
+                comps.append(&mut c);
+            }
         }
     }
-    Some(Some(comps))
+    if !parsed_any {
+        return None;
+    }
+    if never {
+        return Some(None);
+    }
+    Some(Some(drop_gte0(comps)))
+}
+
+/// replaceGTE0: a bare `>=0.0.0` comparator is removed, which matters for
+/// prerelease matching.
+fn drop_gte0(comps: Vec<Comparator>) -> Vec<Comparator> {
+    comps
+        .into_iter()
+        .filter(|c| !(c.op == Op::Ge && c.version == Version::new(0, 0, 0)))
+        .collect()
 }
 
 fn strip_v(text: &str) -> &str {
@@ -603,5 +629,104 @@ mod tests {
         assert!(Range::parse("latest").is_none());
         assert!(Range::parse("github:a/b").is_none());
         assert!(Version::parse("1.2").is_none());
+    }
+}
+
+/// A version interval: lower and upper bounds with inclusivity; None is
+/// unbounded.
+#[derive(Clone, Debug)]
+struct Interval {
+    lo: Option<(Version, bool)>,
+    hi: Option<(Version, bool)>,
+}
+
+impl Interval {
+    fn is_empty(&self) -> bool {
+        match (&self.lo, &self.hi) {
+            (Some((l, li)), Some((h, hi))) => l > h || (l == h && !(*li && *hi)),
+            _ => false,
+        }
+    }
+
+    /// Whether `self` lies within `other`.
+    fn within(&self, other: &Interval) -> bool {
+        let lo_ok = match (&other.lo, &self.lo) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some((ol, oi)), Some((sl, si))) => sl > ol || (sl == ol && (*oi || !*si)),
+        };
+        let hi_ok = match (&other.hi, &self.hi) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some((oh, oi)), Some((sh, si))) => sh < oh || (sh == oh && (*oi || !*si)),
+        };
+        lo_ok && hi_ok
+    }
+}
+
+impl Range {
+    fn intervals(&self) -> Vec<Interval> {
+        let mut out = Vec::new();
+        for set in self.sets.iter().flatten() {
+            let mut iv = Interval { lo: None, hi: None };
+            for c in set {
+                let v = c.version.clone();
+                match c.op {
+                    Op::Ge | Op::Gt => {
+                        let inc = c.op == Op::Ge;
+                        let tighter = match &iv.lo {
+                            None => true,
+                            Some((l, li)) => v > *l || (v == *l && *li && !inc),
+                        };
+                        if tighter {
+                            iv.lo = Some((v, inc));
+                        }
+                    }
+                    Op::Le | Op::Lt => {
+                        let inc = c.op == Op::Le;
+                        let tighter = match &iv.hi {
+                            None => true,
+                            Some((h, hi)) => v < *h || (v == *h && *hi && !inc),
+                        };
+                        if tighter {
+                            iv.hi = Some((v, inc));
+                        }
+                    }
+                    Op::Eq => {
+                        iv.lo = Some((v.clone(), true));
+                        iv.hi = Some((v, true));
+                    }
+                }
+            }
+            if !iv.is_empty() {
+                out.push(iv);
+            }
+        }
+        out
+    }
+}
+
+/// `semver.subset(sub, dom)`: every version matching `sub` matches `dom`.
+/// Prerelease subtleties are ignored; lockstep only uses this to choose
+/// the saved spec of an added dependency.
+pub fn subset(sub: &str, dom: &str) -> bool {
+    let (Some(s), Some(d)) = (Range::parse(sub), Range::parse(dom)) else {
+        return false;
+    };
+    let dom = d.intervals();
+    s.intervals().iter().all(|iv| dom.iter().any(|d| iv.within(d)))
+}
+
+#[cfg(test)]
+mod subset_tests {
+    use super::subset;
+
+    #[test]
+    fn subsets() {
+        assert!(subset("^3.0.1", "^3.0.0"));
+        assert!(!subset("^6.0.3", "~6.0.0"));
+        assert!(subset("^1.5.0", "1.x || 2.x"));
+        assert!(!subset("^6.0.3", ">=6.0.0 <6.0.3"));
+        assert!(subset("^1.2.3", "*"));
     }
 }

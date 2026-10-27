@@ -66,46 +66,6 @@ pub fn read_manifest(dir: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
-const DEP_FIELDS: [&str; 4] = [
-    "dependencies",
-    "devDependencies",
-    "optionalDependencies",
-    "peerDependencies",
-];
-
-/// npm ci refuses to install when package.json and the lockfile disagree.
-/// The lockfile's root entry records the dependency specs it was built
-/// from; they must match package.json exactly.
-fn check_in_sync(manifest: &Map<String, Value>, root: &Entry) -> Result<(), String> {
-    for field in DEP_FIELDS {
-        let want = manifest.get(field).and_then(Value::as_object);
-        let have = root.raw.get(field).and_then(Value::as_object);
-        let empty = Map::new();
-        let want = want.unwrap_or(&empty);
-        let have = have.unwrap_or(&empty);
-        let mut problems = Vec::new();
-        for (name, spec) in want {
-            match have.get(name) {
-                Some(s) if s == spec => {}
-                Some(s) => problems.push(format!("{name}: package.json has {spec}, lockfile has {s}")),
-                None => problems.push(format!("{name}@{spec} is missing from the lockfile")),
-            }
-        }
-        for name in have.keys() {
-            if !want.contains_key(name) {
-                problems.push(format!("{name} is in the lockfile but not in package.json"));
-            }
-        }
-        if !problems.is_empty() {
-            return Err(format!(
-                "package.json and package-lock.json are not in sync ({field}):\n  {}\nRun `lockstep install` to update the lockfile.",
-                problems.join("\n  ")
-            ));
-        }
-    }
-    Ok(())
-}
-
 struct Plan {
     /// Indexes of entries placed in a node_modules folder, in lockfile order.
     install: Vec<usize>,
@@ -231,9 +191,21 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     let started = Instant::now();
     let dir = &opts.dir;
     let manifest = read_manifest(dir)?;
-    let lock = Lockfile::read(&dir.join("package-lock.json"))?;
-    let root = lock.root().ok_or("lockfile has no root entry (\"\")")?;
-    check_in_sync(&manifest, root)?;
+    let mut lock = Lockfile::read(&dir.join("package-lock.json"))?;
+    lock.root().ok_or("lockfile has no root entry (\"\")")?;
+    // npm ci's ideal tree decides validity and the dependency flags.
+    let ideal = crate::resolve::ci_ideal_flags(dir, &lock, &opts.store)?;
+    // Extraneous lockfile entries are pruned from the ideal tree, so they
+    // are not installed.
+    lock.entries.retain(|e| e.is_root() || ideal.contains_key(&e.path));
+    for e in &mut lock.entries {
+        if let Some(f) = ideal.get(&e.path) {
+            e.dev = f.dev;
+            e.optional = f.optional;
+            e.dev_optional = f.dev_optional;
+            e.peer = f.peer;
+        }
+    }
     for e in &lock.entries {
         if e.is_root() || !e.in_node_modules() || e.link {
             continue;

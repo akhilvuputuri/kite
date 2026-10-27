@@ -1,7 +1,3 @@
-// The resolver (next milestone) uses the semver and lockfile fields that
-// `ci` does not need yet.
-#![allow(dead_code)]
-
 mod bins;
 mod collate;
 mod extract;
@@ -15,6 +11,7 @@ mod lockfile;
 mod lockmeta;
 mod platform;
 mod pool;
+mod resolve;
 mod run;
 mod scripts;
 mod semver;
@@ -28,6 +25,9 @@ lockstep — install and run JavaScript packages from package-lock.json
 
 Usage:
   lockstep [options] ci [--omit=dev|optional|peer]... [--ignore-scripts]
+  lockstep [options] install [pkg[@spec]...] [-D|-O|-P|--save-peer] [-E] [--lockfile-only]
+  lockstep [options] uninstall <pkg>... [--lockfile-only]
+  lockstep [options] update [pkg...] [--lockfile-only]
   lockstep [options] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
   lockstep [options] test [args...]        (also: start)
   lockstep [options] exec <bin> [--] [args...]
@@ -129,6 +129,69 @@ fn real_main() -> Result<u8, String> {
             })?;
             Ok(0)
         }
+        "install" | "i" | "add" | "uninstall" | "remove" | "rm" | "un" | "r" | "update" | "up" | "upgrade" => {
+            let mode = match command.as_str() {
+                "install" | "i" | "add" => "install",
+                "update" | "up" | "upgrade" => "update",
+                _ => "uninstall",
+            };
+            let mut omit = install::Omit::default();
+            let mut ignore_scripts = false;
+            let mut lockfile_only = false;
+            let mut save_type = None;
+            let mut save_exact = false;
+            let mut before = None;
+            let mut names: Vec<String> = Vec::new();
+            while let Some(arg) = args.next() {
+                if global_option(&mut g, &arg, &mut args)? {
+                    continue;
+                }
+                match arg.split('=').next().unwrap_or("") {
+                    "--omit" => match value(&arg, &mut args)?.as_str() {
+                        "dev" => omit.dev = true,
+                        "optional" => omit.optional = true,
+                        "peer" => omit.peer = true,
+                        other => {
+                            return Err(format!("--omit={other} is not supported (dev, optional, peer)"));
+                        }
+                    },
+                    "--ignore-scripts" => ignore_scripts = true,
+                    "--lockfile-only" | "--package-lock-only" => lockfile_only = true,
+                    "-D" | "--save-dev" => save_type = Some(resolve::SaveType::Dev),
+                    "-O" | "--save-optional" => save_type = Some(resolve::SaveType::Optional),
+                    "-P" | "--save-prod" => save_type = Some(resolve::SaveType::Prod),
+                    "--save-peer" => save_type = Some(resolve::SaveType::Peer),
+                    "-E" | "--save-exact" => save_exact = true,
+                    "--before" => before = Some(value(&arg, &mut args)?),
+                    _ if arg.starts_with('-') => return Err(format!("unknown option {arg:?} for {command}")),
+                    _ => names.push(arg),
+                }
+            }
+            if mode == "uninstall" && names.is_empty() {
+                return Err("uninstall needs at least one package name".into());
+            }
+            if mode == "update" && names.iter().any(|n| n[1..].contains('@')) {
+                return Err("update takes package names only; use install name@spec to change a range".into());
+            }
+            resolve::run(resolve::ResolveOptions {
+                ci: install::CiOptions {
+                    dir: project_dir(&g)?,
+                    omit,
+                    ignore_scripts,
+                    store: g.store.clone().unwrap_or_else(store::Store::default_root),
+                    jobs: g.jobs.unwrap_or_else(pool::default_jobs),
+                    quiet: g.quiet,
+                },
+                add: if mode == "install" { names.clone() } else { Vec::new() },
+                save_type,
+                save_exact,
+                rm: if mode == "uninstall" { names.clone() } else { Vec::new() },
+                update: if mode == "update" { Some(names) } else { None },
+                lockfile_only,
+                before,
+            })?;
+            Ok(0)
+        }
         "run" | "run-script" | "test" | "t" | "tst" | "start" => {
             let mut silent = false;
             let mut if_present = false;
@@ -207,6 +270,44 @@ fn real_main() -> Result<u8, String> {
             }
             let bin = bin.ok_or("exec needs a bin name")?;
             run::exec_bin(&project_dir(&g)?, &bin, &rest)
+        }
+        // Differential testing hooks for harness/fuzz.mjs (not part of the CLI).
+        "__debug" => {
+            use std::io::{BufRead, Write};
+            let mode = args.next().unwrap_or_default();
+            let stdin = std::io::stdin();
+            let mut out = std::io::BufWriter::new(std::io::stdout());
+            let mut lines: Vec<String> = Vec::new();
+            for line in stdin.lock().lines() {
+                lines.push(line.map_err(|e| e.to_string())?);
+            }
+            match mode.as_str() {
+                "satisfies" => {
+                    for line in &lines {
+                        let (range, version) = line.split_once('\t').unwrap_or((line, ""));
+                        let result = match (semver::Range::parse(range), semver::Version::parse(version)) {
+                            (Some(r), Some(v)) => {
+                                if r.satisfies(&v) {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            (None, _) => "invalid-range",
+                            (_, None) => "invalid-version",
+                        };
+                        writeln!(out, "{result}").map_err(|e| e.to_string())?;
+                    }
+                }
+                "collate" => {
+                    lines.sort_by(|a, b| collate::compare(a, b));
+                    for line in &lines {
+                        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+                    }
+                }
+                other => return Err(format!("unknown __debug mode {other:?}")),
+            }
+            Ok(0)
         }
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }

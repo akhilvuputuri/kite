@@ -1,0 +1,1 @@
+{"name":"jb","version":"1.0.0","devDependencies":{"jest":"^29.7.0","babel-jest":"^29.7.0","@babel/core":"^7.24.0","@babel/preset-env":"^7.24.0","@babel/preset-typescript":"^7.24.0"}}

@@ -1,0 +1,8 @@
+{
+	"name": "tabs",
+	"version": "1.0.0",
+	"dependencies": {
+		"debug": "^4.3.0",
+		"chalk": "^4.1.0"
+	}
+}

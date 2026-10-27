@@ -91,6 +91,67 @@ fn get_once(url: &str, accept: Option<&str>) -> Result<Vec<u8>, HttpError> {
     Ok(body)
 }
 
+pub enum Revalidated {
+    NotModified,
+    Fresh { body: Vec<u8>, etag: Option<String> },
+}
+
+/// GETs `url`, sending `If-None-Match` when an ETag is known, with the same
+/// retries as `get`.
+pub fn get_revalidate(url: &str, accept: &str, etag: Option<&str>) -> Result<Revalidated, HttpError> {
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(500 * 4u64.pow(attempt - 1)));
+        }
+        let mut request = agent().get(url).header("accept", accept);
+        if let Some(tag) = etag {
+            request = request.header("if-none-match", tag);
+        }
+        let response = match request.call() {
+            Ok(r) => r,
+            Err(e) => {
+                last = Some(HttpError {
+                    message: format!("GET {url}: {e}"),
+                    status: None,
+                });
+                continue;
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 304 {
+            return Ok(Revalidated::NotModified);
+        }
+        if status != 200 {
+            let error = HttpError {
+                message: format!("GET {url}: HTTP {status}"),
+                status: Some(status),
+            };
+            if status == 408 || status == 429 || status >= 500 {
+                last = Some(error);
+                continue;
+            }
+            return Err(error);
+        }
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let mut body = Vec::new();
+        match response.into_body().into_reader().take(MAX_BODY).read_to_end(&mut body) {
+            Ok(_) => return Ok(Revalidated::Fresh { body, etag }),
+            Err(e) => {
+                last = Some(HttpError {
+                    message: format!("GET {url}: reading body: {e}"),
+                    status: None,
+                })
+            }
+        }
+    }
+    Err(last.expect("at least one attempt"))
+}
+
 /// Only tarballs from the public npm registry are supported.
 pub fn check_registry_url(url: &str) -> Result<(), String> {
     if url.starts_with(REGISTRY) && !url[REGISTRY.len()..].contains("..") {
