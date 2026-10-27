@@ -13,6 +13,9 @@ jobs:
   gate:
     name: tag is on main with green CI
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
