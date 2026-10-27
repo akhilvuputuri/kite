@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -119,9 +119,7 @@ fn extract_archive<R: Read>(archive: &mut tar::Archive<R>, dest: &Path, umask: u
         if size > MAX_FILE || total > MAX_PACKAGE {
             return Err(io::Error::other("package is too large to unpack"));
         }
-        let mut contents = Vec::with_capacity(size as usize);
-        (&mut entry).take(MAX_FILE).read_to_end(&mut contents)?;
-        write_file(&target, &contents, mode)?;
+        write_file(&target, &mut (&mut entry).take(MAX_FILE), mode)?;
         match index.get(&rel) {
             // A later duplicate replaces the content; node-tar keeps the
             // first file's mode because it does not chmod (noChmod).
@@ -170,7 +168,7 @@ fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn write_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+fn write_file(path: &Path, contents: &mut dyn Read, mode: u32) -> io::Result<()> {
     let existing = fs::symlink_metadata(path).ok();
     if let Some(meta) = &existing
         && meta.is_dir()
@@ -183,7 +181,7 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         .truncate(true)
         .mode(mode)
         .open(path)?;
-    file.write_all(contents)?;
+    io::copy(contents, &mut file)?;
     // The kernel applies the process umask to `mode`, which already
     // includes it, so no chmod is needed. A file that existed keeps its
     // first mode (node-tar's noChmod).
@@ -193,6 +191,7 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn modes() {

@@ -69,6 +69,10 @@ impl Store {
     /// through a hard link, for example) is discarded and fetched again.
     pub fn ensure(&self, integrity: &Integrity, url: &str) -> Result<StoredPackage, String> {
         let dir = self.entry_dir(integrity);
+        // The entry this process inspected, by inode, so a concurrent
+        // process's fresh replacement is never discarded by mistake.
+        let inode = |d: &Path| fs::metadata(d.join("index")).map(|m| m.ino()).ok();
+        let seen = inode(&dir);
         if dir.exists() {
             match read_index(&dir.join("index")) {
                 // Only entries that were ever hard-linked can have been
@@ -84,8 +88,25 @@ impl Store {
                 // process may be linking from it) and fetch it again.
                 _ => {
                     TAMPERED.fetch_add(1, Ordering::Relaxed);
-                    self.discard(&dir)
-                        .map_err(|e| format!("cannot replace damaged store entry {}: {e}", dir.display()))?;
+                    if inode(&dir) == seen {
+                        match self.discard(&dir) {
+                            Ok(()) => {}
+                            // Another process discarded it first.
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                return Err(format!("cannot replace damaged store entry {}: {e}", dir.display()));
+                            }
+                        }
+                    } else if let Some(files) = read_index(&dir.join("index"))
+                        && verify(&dir.join("package"), &files)
+                    {
+                        // Replaced by another process meanwhile, and good.
+                        return Ok(StoredPackage {
+                            dir: dir.join("package"),
+                            files: files.into_iter().map(|f| f.file).collect(),
+                            downloaded: false,
+                        });
+                    }
                 }
             }
         }

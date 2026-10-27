@@ -39,17 +39,22 @@ pub fn materialize(
     let mut made: HashSet<PathBuf> = HashSet::new();
     made.insert(dest.to_path_buf());
     let mut marked = false;
+    let mut copy_only = false;
     for file in files {
         let target = dest.join(&file.path);
         if let Some(parent) = target.parent() {
             create_dirs(dest, parent, dmode, &mut made)?;
         }
         let source = src.join(&file.path);
-        if !private && !HARDLINK_FAILED.load(Ordering::Relaxed) {
-            if !marked {
-                before_hard_link()?;
-                marked = true;
+        if !private && !HARDLINK_FAILED.load(Ordering::Relaxed) && !marked {
+            marked = true;
+            // Without the marker the store could not tell that this
+            // entry is shared, so fall back to private copies.
+            if before_hard_link().is_err() {
+                copy_only = true;
             }
+        }
+        if !private && !copy_only && !HARDLINK_FAILED.load(Ordering::Relaxed) {
             match fs::hard_link(&source, &target) {
                 Ok(()) => continue,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {

@@ -124,6 +124,20 @@ fn global_npmrc() -> Option<std::path::PathBuf> {
     Some(node.parent()?.parent()?.join("etc").join("npmrc"))
 }
 
+/// The node-gyp npm bundles: `<prefix>/lib/node_modules/npm/node_modules/
+/// node-gyp/bin/node-gyp.js`, next to the `node` on PATH.
+fn bundled_node_gyp() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let node = std::env::split_paths(&path)
+        .map(|d| d.join("node"))
+        .find(|p| p.is_file())?;
+    Some(
+        node.parent()?
+            .parent()?
+            .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js"),
+    )
+}
+
 fn read_layer(path: Option<std::path::PathBuf>, label: &str) -> BTreeMap<String, (String, String)> {
     let mut layer = BTreeMap::new();
     if let Some(path) = path
@@ -139,24 +153,50 @@ impl Config {
     /// environment; the command line is applied by `omit`) and refuses
     /// settings lockstep does not implement.
     pub fn load(project: &Path, cli: &Cli) -> Result<Config, String> {
-        let user = std::env::var_os("NPM_CONFIG_USERCONFIG")
-            .or_else(|| std::env::var_os("npm_config_userconfig"))
+        // @npmcli/config: the environment and the project .npmrc can name
+        // the user config, and they plus the user config can name the
+        // global config or the prefix it lives under.
+        let env = |k: &str| {
+            std::env::var(format!("npm_config_{k}"))
+                .or_else(|_| std::env::var(format!("NPM_CONFIG_{}", k.to_ascii_uppercase())))
+                .ok()
+                .filter(|v| !v.is_empty())
+        };
+        let project_layer = read_layer(Some(project.join(".npmrc")), "project .npmrc");
+        let user = env("userconfig")
+            .or_else(|| project_layer.get("userconfig").map(|v| v.0.clone()))
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".npmrc")));
+        let user_layer = read_layer(user, "user .npmrc");
+        let from_layers = |k: &str| {
+            env(k)
+                .or_else(|| project_layer.get(k).map(|v| v.0.clone()))
+                .or_else(|| user_layer.get(k).map(|v| v.0.clone()))
+        };
+        let global = from_layers("globalconfig").map(std::path::PathBuf::from).or_else(|| {
+            from_layers("prefix")
+                .map(|p| std::path::PathBuf::from(p).join("etc").join("npmrc"))
+                .or_else(global_npmrc)
+        });
         // Each key takes its value from the highest layer that sets it.
         let mut settings: BTreeMap<String, (String, String)> = BTreeMap::new();
-        settings.extend(read_layer(global_npmrc(), "global npmrc"));
-        settings.extend(read_layer(user, "user .npmrc"));
-        settings.extend(read_layer(Some(project.join(".npmrc")), "project .npmrc"));
+        settings.extend(read_layer(global, "global npmrc"));
+        settings.extend(user_layer);
+        settings.extend(project_layer);
         let mut env_layer: BTreeMap<String, (String, String)> = BTreeMap::new();
         for (key, value) in std::env::vars() {
             let lower = key.to_ascii_lowercase();
             if let Some(name) = lower.strip_prefix("npm_config_") {
-                // npm ignores empty environment values.
+                // npm ignores empty environment values, and turns every `_`
+                // but a leading one into `-` (`_auth` stays a credential).
                 if name.is_empty() || value.is_empty() {
                     continue;
                 }
-                env_layer.insert(name.replace('_', "-"), (value, format!("environment variable {key}")));
+                let name = match name.strip_prefix('_') {
+                    Some(rest) => format!("_{}", rest.replace('_', "-")),
+                    None => name.replace('_', "-"),
+                };
+                env_layer.insert(name, (value, format!("environment variable {key}")));
             }
         }
         settings.extend(env_layer);
@@ -202,8 +242,8 @@ impl Config {
                 "registry" if value.trim_end_matches('/') == "https://registry.npmjs.org" => {}
                 "install-strategy" if value == "hoisted" => {}
                 "script-shell" if value == "sh" || value == "/bin/sh" => {}
-                // npm passes its bundled node-gyp to scripts it runs.
-                "node-gyp" if value.ends_with("node-gyp/bin/node-gyp.js") => {}
+                // npm passes its own bundled node-gyp to scripts it runs.
+                "node-gyp" if bundled_node_gyp().is_some_and(|p| p == std::path::Path::new(value)) => {}
                 "legacy-peer-deps" | "strict-peer-deps" | "force" | "prefer-dedupe" if !parse_bool(key, value)? => {}
                 _ => refused.push(format!("{key}={value} ({source})")),
             }
