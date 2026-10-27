@@ -338,8 +338,10 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
             return Ok(());
         }
         let pkg = pkg.expect("registry packages are stored before placing");
-        link::materialize(&pkg.dir, &pkg.files, &dest, umask, e.has_install_script)
-            .map_err(|err| format!("{}: {err}", e.path))
+        link::materialize(&pkg.dir, &pkg.files, &dest, umask, e.has_install_script, &|| {
+            crate::store::mark_linked(&pkg.dir)
+        })
+        .map_err(|err| format!("{}: {err}", e.path))
     };
 
     // Download, verify and store each package; a package directly under a

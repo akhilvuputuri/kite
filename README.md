@@ -29,8 +29,13 @@ lockstep exec tsc --noEmit       # npx tsc --noEmit
 - **One self-contained binary.** No Node.js is needed to install lockstep itself, and it has no
   runtime dependencies beyond the system C library. Release builds ship for Linux x64,
   Linux arm64 and macOS arm64, each with a SHA-256 checksum.
-- **Strict integrity.** Every tarball is checked against the lockfile's `integrity` before a
-  single byte is unpacked. Only verified content enters the store.
+- **Strict integrity.** Every tarball is hashed against the lockfile's `integrity` as it streams
+  in, and its files only become a store entry once the whole tarball matched. Store entries that
+  were ever hard-linked into a project are checked (mode, size and modification time of every
+  file) before each reuse and re-downloaded if anything changed. This catches ordinary in-place
+  edits through `node_modules`; it is not a defence against someone deliberately rewriting a file
+  and restoring its timestamp. On macOS, packages are cloned copy-on-write instead, so edits in
+  `node_modules` cannot reach the store at all.
 
 ## Proven compatibility
 

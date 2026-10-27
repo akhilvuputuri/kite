@@ -1,6 +1,6 @@
 //! A content-addressable store of verified, extracted packages.
 //!
-//! Layout: `<root>/v1/u<umask>/<algorithm>-<hex digest>/` holding
+//! Layout: `<root>/v2/u<umask>/<algorithm>-<hex digest>/` holding
 //! `package/` (the extracted files, modes already applied) and `index`
 //! (one `<octal mode> <path>` line per file). An entry only appears under
 //! its final name after it is complete, so a present entry is trusted:
@@ -57,7 +57,7 @@ impl Store {
     }
 
     fn entries_dir(&self) -> PathBuf {
-        self.root.join("v1").join(format!("u{:03o}", self.umask))
+        self.root.join("v2").join(format!("u{:03o}", self.umask))
     }
 
     fn entry_dir(&self, integrity: &Integrity) -> PathBuf {
@@ -69,18 +69,25 @@ impl Store {
     /// through a hard link, for example) is discarded and fetched again.
     pub fn ensure(&self, integrity: &Integrity, url: &str) -> Result<StoredPackage, String> {
         let dir = self.entry_dir(integrity);
-        if let Some(files) = read_index(&dir.join("index")) {
-            // macOS clones are copy-on-write, so only hard-linked (Linux)
-            // stores can be changed through node_modules.
-            if cfg!(target_os = "macos") || verify(&dir.join("package"), &files) {
-                return Ok(StoredPackage {
-                    dir: dir.join("package"),
-                    files: files.into_iter().map(|f| f.file).collect(),
-                    downloaded: false,
-                });
+        if dir.exists() {
+            match read_index(&dir.join("index")) {
+                // Only entries that were ever hard-linked can have been
+                // changed through node_modules; clones are copy-on-write.
+                Some(files) if !dir.join("linked").exists() || verify(&dir.join("package"), &files) => {
+                    return Ok(StoredPackage {
+                        dir: dir.join("package"),
+                        files: files.into_iter().map(|f| f.file).collect(),
+                        downloaded: false,
+                    });
+                }
+                // Changed or unreadable: move it aside atomically (another
+                // process may be linking from it) and fetch it again.
+                _ => {
+                    TAMPERED.fetch_add(1, Ordering::Relaxed);
+                    self.discard(&dir)
+                        .map_err(|e| format!("cannot replace damaged store entry {}: {e}", dir.display()))?;
+                }
             }
-            TAMPERED.fetch_add(1, Ordering::Relaxed);
-            let _ = fs::remove_dir_all(&dir);
         }
         fetch::check_registry_url(url)?;
         let mut last = String::new();
@@ -165,12 +172,52 @@ impl Store {
         fs::write(tmp.join("index"), index).map_err(io_err)?;
         match fs::rename(&tmp, &final_dir) {
             Ok(()) => {}
-            // Another process stored the same content first.
-            Err(_) if final_dir.join("index").exists() => {}
+            // Another process stored the same content first: use its entry
+            // only if it verifies.
+            Err(_) if final_dir.exists() => {
+                let winner = read_index(&final_dir.join("index"));
+                match winner {
+                    Some(w) if verify(&final_dir.join("package"), &w) => {}
+                    _ => {
+                        return Err(Failure::Fatal(format!(
+                            "store entry {} changed while it was being written; run again",
+                            final_dir.display()
+                        )));
+                    }
+                }
+            }
             Err(e) => return Err(io_err(e)),
         }
         drop(cleanup);
         Ok((final_dir.join("package"), files))
+    }
+}
+
+/// Records that files of the entry holding `package_dir` are about to be
+/// shared by hard link, so later reuse verifies them.
+pub fn mark_linked(package_dir: &Path) -> io::Result<()> {
+    let marker = package_dir
+        .parent()
+        .map(|p| p.join("linked"))
+        .ok_or_else(|| io::Error::other("bad store path"))?;
+    if !marker.exists() {
+        fs::write(marker, b"")?;
+    }
+    Ok(())
+}
+
+impl Store {
+    fn discard(&self, dir: &Path) -> io::Result<()> {
+        let tmp_root = self.root.join("tmp");
+        fs::create_dir_all(&tmp_root)?;
+        let aside = tmp_root.join(format!(
+            "discarded.{}.{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::rename(dir, &aside)?;
+        let _ = fs::remove_dir_all(&aside);
+        Ok(())
     }
 }
 

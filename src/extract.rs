@@ -26,6 +26,9 @@ pub struct ExtractedFile {
     pub mode: u32,
 }
 
+const MAX_FILE: u64 = 1 << 30;
+const MAX_PACKAGE: u64 = 4 << 30;
+
 pub fn file_mode(tar_mode: u32, umask: u32) -> u32 {
     ((tar_mode | 0o666) | 0o600) & !umask & 0o7777
 }
@@ -79,6 +82,7 @@ fn extract_archive<R: Read>(archive: &mut tar::Archive<R>, dest: &Path, umask: u
     let mut files: Vec<ExtractedFile> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let dmode = dir_mode(umask);
+    let mut total: u64 = 0;
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -108,8 +112,15 @@ fn extract_archive<R: Read>(archive: &mut tar::Archive<R>, dest: &Path, umask: u
         if let Some(parent) = target.parent() {
             ensure_dirs(dest, parent, dmode, &mut made_dirs)?;
         }
-        let mut contents = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut contents)?;
+        // Unpacked bytes are not trusted until the hash is checked, so their
+        // size is bounded: 1 GiB per file, 4 GiB per package.
+        let size = entry.size();
+        total = total.saturating_add(size);
+        if size > MAX_FILE || total > MAX_PACKAGE {
+            return Err(io::Error::other("package is too large to unpack"));
+        }
+        let mut contents = Vec::with_capacity(size as usize);
+        (&mut entry).take(MAX_FILE).read_to_end(&mut contents)?;
         write_file(&target, &contents, mode)?;
         match index.get(&rel) {
             // A later duplicate replaces the content; node-tar keeps the

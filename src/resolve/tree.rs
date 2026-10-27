@@ -173,11 +173,19 @@ impl Tree {
         let id = self.nodes.len();
         let package = self.nodes[target].package.clone();
         let realpath = self.nodes[target].realpath.clone();
+        // Link.resolved is `file:<path from the link's folder>`, so a link
+        // never matches a registry package by name and version.
+        let from = match path.rfind('/') {
+            Some(i) => &path[..i],
+            None => "",
+        };
+        let resolved = Some(format!("file:{}", relpath(from, &realpath)));
         self.nodes.push(Node {
             name: name.to_string(),
             path: path.to_string(),
             realpath,
             package,
+            resolved,
             is_link: true,
             target: Some(target),
             dev: true,

@@ -104,6 +104,7 @@ fn real_main() -> Result<u8, String> {
         "ci" | "clean-install" => {
             let mut omit = install::Omit::default();
             let mut include = (false, false, false);
+            let mut production = false;
             let mut ignore_scripts = false;
             while let Some(arg) = args.next() {
                 if global_option(&mut g, &arg, &mut args)? {
@@ -125,17 +126,32 @@ fn real_main() -> Result<u8, String> {
                         "prod" => {}
                         other => return Err(format!("--include={other} is not supported")),
                     },
-                    "--production" => omit.dev = true,
+                    "--production" => production = true,
                     "--ignore-scripts" => ignore_scripts = true,
                     _ => return Err(format!("unknown argument {arg:?} for ci")),
                 }
             }
             let dir = project_dir(&g)?;
-            let cfg = config::Config::load(&dir)?;
-            let (dev, optional, peer) = cfg.omit((omit.dev, omit.optional, omit.peer), include);
+            let mut cli = config::Cli::default();
+            for (on, name) in [(omit.dev, "dev"), (omit.optional, "optional"), (omit.peer, "peer")] {
+                if on {
+                    cli.omit.push(name.into());
+                }
+            }
+            for (on, name) in [(include.0, "dev"), (include.1, "optional"), (include.2, "peer")] {
+                if on {
+                    cli.include.push(name.into());
+                }
+            }
+            cli.production = production;
+            let cfg = config::Config::load(&dir, &cli)?;
             install::ci(&install::CiOptions {
                 dir,
-                omit: install::Omit { dev, optional, peer },
+                omit: install::Omit {
+                    dev: cfg.omit_dev,
+                    optional: cfg.omit_optional,
+                    peer: cfg.omit_peer,
+                },
                 ignore_scripts: ignore_scripts || cfg.ignore_scripts,
                 store: g.store.clone().unwrap_or_else(store::Store::default_root),
                 jobs: g.jobs.unwrap_or_else(pool::default_jobs),
@@ -188,13 +204,22 @@ fn real_main() -> Result<u8, String> {
                 return Err("update takes package names only; use install name@spec to change a range".into());
             }
             let dir = project_dir(&g)?;
-            let cfg = config::Config::load(&dir)?;
-            let (dev, optional, peer) = cfg.omit((omit.dev, omit.optional, omit.peer), (false, false, false));
+            let mut cli = config::Cli::default();
+            for (on, name) in [(omit.dev, "dev"), (omit.optional, "optional"), (omit.peer, "peer")] {
+                if on {
+                    cli.omit.push(name.into());
+                }
+            }
+            let cfg = config::Config::load(&dir, &cli)?;
             let save_exact = save_exact || cfg.save_exact;
             resolve::run(resolve::ResolveOptions {
                 ci: install::CiOptions {
                     dir,
-                    omit: install::Omit { dev, optional, peer },
+                    omit: install::Omit {
+                        dev: cfg.omit_dev,
+                        optional: cfg.omit_optional,
+                        peer: cfg.omit_peer,
+                    },
                     ignore_scripts: ignore_scripts || cfg.ignore_scripts,
                     store: g.store.clone().unwrap_or_else(store::Store::default_root),
                     jobs: g.jobs.unwrap_or_else(pool::default_jobs),

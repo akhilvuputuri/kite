@@ -68,6 +68,43 @@ fn normalize_before(before: &str) -> Result<String, String> {
     Ok(format!("{date_time}.{:0<3}Z", &frac[..frac.len().min(3)]))
 }
 
+/// Every package folder in node_modules (including scoped and nested ones)
+/// is no newer than the hidden lockfile.
+fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bool {
+    let Ok(written) = fs::metadata(hidden).and_then(|m| m.modified()) else {
+        return false;
+    };
+    fn walk(dir: &std::path::Path, written: std::time::SystemTime, depth: usize) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else { return true };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".package-lock.json" || name == ".bin" {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                return false;
+            };
+            if meta.modified().map(|m| m > written).unwrap_or(true) {
+                return false;
+            }
+            if meta.is_dir() && depth < 32 {
+                let nested = if name.starts_with('@') {
+                    path.clone()
+                } else {
+                    path.join("node_modules")
+                };
+                if !walk(&nested, written, depth + 1) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    walk(nm, written, 0)
+}
+
 pub fn run(opts: ResolveOptions) -> Result<(), String> {
     let dir = opts.ci.dir.clone();
     let project = dir.to_string_lossy().trim_end_matches('/').to_string();
@@ -94,6 +131,15 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
         // lockstep refuses rather than resolve differently.
         let hidden = dir.join("node_modules/.package-lock.json");
         if hidden.exists() {
+            // Arborist trusts the hidden lockfile only when nothing in
+            // node_modules changed after it was written.
+            if !hidden_lockfile_current(&dir.join("node_modules"), &hidden) {
+                return Err(
+                    "there is no package-lock.json, and node_modules changed after it was last installed; \
+                            remove node_modules or restore package-lock.json"
+                        .into(),
+                );
+            }
             Some(Lockfile::read(&hidden)?)
         } else if fs::read_dir(dir.join("node_modules"))
             .map(|d| d.flatten().any(|e| !e.file_name().to_string_lossy().starts_with('.')))
