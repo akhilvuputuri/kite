@@ -82,6 +82,28 @@ fn parse_registry(spec: &str) -> Option<Spec> {
     None
 }
 
+/// Rejects dependency names that could not be npm package names, in
+/// particular anything that would escape `node_modules` as a path.
+pub fn check_name(name: &str) -> Result<(), String> {
+    let bad = || Err(format!("{name:?} is not a valid package name"));
+    if name.is_empty() || name.len() > 214 || name.trim() != name {
+        return bad();
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    let ok_part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with('.')
+            && !p.starts_with('_')
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~!*'()".contains(&b))
+    };
+    match parts.as_slice() {
+        [n] if ok_part(n) => Ok(()),
+        [scope, n] if scope.len() > 1 && scope.starts_with('@') && ok_part(&scope[1..]) && ok_part(n) => Ok(()),
+        _ => bad(),
+    }
+}
+
 /// Splits `name@spec` (scoped names keep their leading `@`).
 pub fn split_name_spec(text: &str) -> (&str, Option<&str>) {
     let search_from = if text.starts_with('@') { 1 } else { 0 };

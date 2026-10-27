@@ -122,17 +122,13 @@ impl Hasher {
     }
 }
 
-pub fn sha512_sri(data: &[u8]) -> String {
-    format!("sha512-{}", STANDARD.encode(Sha512::digest(data)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parses_and_verifies_sha512() {
-        let sri = sha512_sri(b"hello");
+        let sri = format!("sha512-{}", STANDARD.encode(Sha512::digest(b"hello")));
         let integrity = Integrity::parse(&sri).unwrap();
         let mut hasher = integrity.hasher();
         hasher.update(b"hello");
@@ -142,7 +138,7 @@ mod tests {
 
     #[test]
     fn keeps_strongest_hash() {
-        let sri = format!("sha1-AAAA {}", sha512_sri(b"x"));
+        let sri = format!("sha1-AAAA sha512-{}", STANDARD.encode(Sha512::digest(b"x")));
         assert_eq!(Integrity::parse(&sri).unwrap().algorithm, Algorithm::Sha512);
     }
 

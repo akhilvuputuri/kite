@@ -58,7 +58,10 @@ lockstep_status=$(cat "$work/$name-lockstep.status")
 if [ "$npm_status" != 0 ] || [ "$lockstep_status" != 0 ]; then
   # Refusing the same lockfile for the same reasons is parity too.
   problems() { grep -oE '(Invalid|Missing): .*' "$1" | sed 's/^npm error //' | sort; }
+  # Both must fail with the same, non-empty list of lockfile problems; two
+  # unrelated failures (a network error, say) are not parity.
   if [ "$npm_status" != 0 ] && [ "$lockstep_status" != 0 ] &&
+    [ -n "$(problems "$work/$name-npm.err")" ] &&
     diff <(problems "$work/$name-npm.err") <(problems "$work/$name-lockstep.err") >/dev/null; then
     echo "parity: $name $* — both refuse the lockfile with the same problems"
     exit 0

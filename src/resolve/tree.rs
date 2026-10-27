@@ -541,7 +541,7 @@ impl Tree {
     /// Edge.satisfiedBy(node): same name and depValid.
     pub fn satisfied_by(&self, e: EdgeId, node: Id) -> bool {
         let edge = &self.edges[e];
-        if key(&self.nodes[node].name) != key(&edge.name) {
+        if self.nodes[node].name != edge.name {
             return false;
         }
         self.dep_valid(node, &edge.name, &edge.spec, edge.from)
@@ -564,10 +564,8 @@ impl Tree {
                 .resolved
                 .as_deref()
                 .is_some_and(|r| r.starts_with("http")),
-            Spec::Alias { name: real, spec: sub } => {
-                if self.package_name(node) != Some(real.as_str()) {
-                    return false;
-                }
+            Spec::Alias { spec: sub, .. } => {
+                // dep-valid.js checks only the alias's sub-spec.
                 match *sub {
                     Spec::Range { range } => range.trim() == "*" || self.version_satisfies(node, &range),
                     Spec::Version { version } => self.version_satisfies(node, &version),
@@ -594,7 +592,7 @@ impl Tree {
     }
 
     pub fn node_satisfies(&self, node: Id, e: EdgeId) -> bool {
-        key(&self.nodes[node].name) == key(&self.edges[e].name) && self.satisfied_by(e, node)
+        self.satisfied_by(e, node)
     }
 
     // ----- comparisons ---------------------------------------------------

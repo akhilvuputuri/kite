@@ -1,0 +1,127 @@
+name: release
+# Pushing a tag vX.Y.Z builds the binaries, proves them, and publishes a
+# GitHub release with SHA-256 checksums. Nothing is published unless every
+# platform builds reproducibly and matches npm on the parity fixtures.
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: read
+env:
+  NODE_VERSION: "22.23.4"
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-24.04, asset: lockstep-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: lockstep-linux-arm64 }
+          - { os: macos-15, asset: lockstep-darwin-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml $version"; exit 1; }
+      - name: Build twice and compare (reproducibility)
+        run: |
+          first=$(harness/build.sh)
+          cp "$first" "$RUNNER_TEMP/first"
+          cargo clean
+          second=$(harness/build.sh)
+          a=$(shasum -a 256 "$RUNNER_TEMP/first" | cut -d' ' -f1)
+          b=$(shasum -a 256 "$second" | cut -d' ' -f1)
+          echo "first $a"; echo "second $b"
+          test "$a" = "$b"
+          mkdir -p dist
+          cp "$second" "dist/${{ matrix.asset }}"
+          (cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
+          file "dist/${{ matrix.asset }}"
+          "dist/${{ matrix.asset }}" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    name: verify ${{ matrix.asset }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-24.04, asset: lockstep-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: lockstep-linux-arm64 }
+          - { os: macos-15, asset: lockstep-darwin-arm64 }
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
+      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      PARITY_WORK: ${{ github.workspace }}/../parity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: "${{ matrix.asset }}", path: dist }
+      - name: Checksum and parity with npm ci
+        run: |
+          cd dist && shasum -a 256 -c "${{ matrix.asset }}.sha256" && cd ..
+          chmod +x "dist/${{ matrix.asset }}"
+          bin="$PWD/dist/${{ matrix.asset }}"
+          for fx in chief pi; do
+            harness/parity.sh "tests/fixtures/$fx" "$bin"
+            harness/parity.sh "tests/fixtures/$fx" "$bin" --omit=dev
+          done
+          RESOLVE_DROP_LOCK=1 harness/resolve-parity.sh tests/fixtures/chief "$bin" fresh-chief install
+      - name: Benchmark against npm, pnpm and Bun
+        run: |
+          npm install -g pnpm@9.15.9 >/dev/null
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.2.23" >/dev/null
+          export PATH="$HOME/.bun/bin:$PATH"
+          {
+            echo "### ${{ matrix.asset }} (${{ matrix.os }}, $(nproc 2>/dev/null || sysctl -n hw.ncpu) CPUs)"
+            echo
+            echo "Clean install of Chief's root lockfile (367 packages), median of 3, scripts off."
+            echo
+            harness/bench.sh tests/fixtures/chief "dist/${{ matrix.asset }}" 3
+          } | tee "bench-${{ matrix.asset }}.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.asset }}
+          path: bench-${{ matrix.asset }}.md
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          cp artifacts/lockstep-*/lockstep-* dist/
+          (cd dist && cat *.sha256 > SHA256SUMS && cat SHA256SUMS)
+          {
+            sed -n "/^## ${GITHUB_REF_NAME#v}/,/^## /p" CHANGELOG.md | sed '$d'
+            echo
+            echo "## Benchmarks"
+            echo
+            cat artifacts/bench-*/bench-*.md
+            echo
+            echo "## Checksums (SHA-256)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --title "lockstep $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

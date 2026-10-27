@@ -388,7 +388,7 @@ pub fn normalize_manifest(mut m: Map<String, Value>) -> Map<String, Value> {
 
 fn sha1_sri(hex: &str) -> Option<String> {
     use base64::Engine;
-    if hex.len() != 40 {
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let bytes: Option<Vec<u8>> = (0..20)

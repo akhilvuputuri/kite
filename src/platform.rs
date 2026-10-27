@@ -23,15 +23,7 @@ impl Platform {
             "arm" => "arm",
             other => other,
         };
-        let libc = if os == "linux" {
-            if cfg!(target_env = "musl") {
-                Some("musl".to_string())
-            } else {
-                Some("glibc".to_string())
-            }
-        } else {
-            None
-        };
+        let libc = if os == "linux" { detect_libc() } else { None };
         Platform {
             os: os.to_string(),
             cpu: cpu.to_string(),
@@ -49,6 +41,38 @@ impl Platform {
                 None => false,
             };
         os_ok && cpu_ok && libc_ok
+    }
+}
+
+/// npm-install-checks current-env.js: the host's C library, from the text
+/// of /usr/bin/ldd. A static lockstep binary cannot ask its own runtime, so
+/// when ldd is unreadable it looks for the dynamic loaders instead.
+fn detect_libc() -> Option<String> {
+    if let Ok(bytes) = std::fs::read("/usr/bin/ldd") {
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains("musl") {
+            return Some("musl".into());
+        }
+        if text.contains("GNU C Library") {
+            return Some("glibc".into());
+        }
+        return None;
+    }
+    let has = |dir: &str, prefix: &str| {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(prefix)))
+            .unwrap_or(false)
+    };
+    if has("/lib", "ld-musl-") {
+        Some("musl".into())
+    } else if has("/lib64", "ld-linux")
+        || has("/lib", "ld-linux")
+        || has("/lib/x86_64-linux-gnu", "libc.so.6")
+        || has("/lib/aarch64-linux-gnu", "libc.so.6")
+    {
+        Some("glibc".into())
+    } else {
+        None
     }
 }
 

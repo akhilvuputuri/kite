@@ -252,7 +252,7 @@ pub fn save_package_json(dir: &Path, root_pkg: &Map<String, Value>) -> Result<bo
     if body.trim() == text.trim() {
         return Ok(false);
     }
-    fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::json::write_atomic(&path, body.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(true)
 }
 

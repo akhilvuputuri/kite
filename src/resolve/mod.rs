@@ -15,6 +15,7 @@ use serde_json::Value;
 
 pub use build::SaveType;
 use build::{AddRequest, Builder, Requests, normalize_root_package};
+pub use registry::NPM_VERSION;
 use registry::{PickSpec, Registry};
 
 use crate::install::{self, CiOptions};
@@ -42,6 +43,9 @@ fn node_version() -> Option<Version> {
 /// compare chronologically.
 fn normalize_before(before: &str) -> Result<String, String> {
     let b = before.trim();
+    if !b.is_ascii() {
+        return Err(format!("--before {before:?}: use an ISO date such as 2026-10-01"));
+    }
     let ok = |s: &str| s.len() >= 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-';
     if !ok(b) {
         return Err(format!(
@@ -81,14 +85,28 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     if dir.join("npm-shrinkwrap.json").exists() {
         return Err("npm-shrinkwrap.json is not supported".into());
     }
-    if dir.join(".npmrc").exists() {
-        eprintln!("lockstep: note: .npmrc is ignored; lockstep resolves with npm's defaults");
-    }
     let lock_path = dir.join("package-lock.json");
     let lock = if lock_path.exists() {
         Some(Lockfile::read(&lock_path)?)
     } else {
-        None
+        // Without a lockfile npm starts from what is installed (loadActual).
+        // node_modules/.package-lock.json records exactly that; without it
+        // lockstep refuses rather than resolve differently.
+        let hidden = dir.join("node_modules/.package-lock.json");
+        if hidden.exists() {
+            Some(Lockfile::read(&hidden)?)
+        } else if fs::read_dir(dir.join("node_modules"))
+            .map(|d| d.flatten().any(|e| !e.file_name().to_string_lossy().starts_with('.')))
+            .unwrap_or(false)
+        {
+            return Err(
+                "there is no package-lock.json, and node_modules was not installed by npm or lockstep; \
+                        remove node_modules or restore package-lock.json"
+                    .into(),
+            );
+        } else {
+            None
+        }
     };
     let before = opts.before.as_deref().map(normalize_before).transpose()?;
     let reg = Registry::new(opts.ci.store.join("packuments"), node_version(), before);
@@ -97,9 +115,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     let mut add: Vec<AddRequest> = Vec::new();
     for arg in &opts.add {
         let (name, spec) = npa::split_name_spec(arg);
-        if name.is_empty() {
-            return Err(format!("{arg:?}: expected a package name"));
-        }
+        npa::check_name(name)?;
         let mut raw_spec = spec.unwrap_or("*").to_string();
         if let Ok(npa::Spec::Tag { tag }) = npa::parse(name, &raw_spec) {
             let doc = reg.packument(name)?;
@@ -135,7 +151,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     let text = save::lockfile_text(&b.t, lock.as_ref().map(|l| &l.raw), &style);
     let changed = fs::read_to_string(&lock_path).map(|old| old != text).unwrap_or(true);
     if changed {
-        fs::write(&lock_path, &text).map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        crate::json::write_atomic(&lock_path, text.as_bytes()).map_err(|e| format!("{}: {e}", lock_path.display()))?;
     }
     if !opts.ci.quiet {
         let count = b.t.inventory().len().saturating_sub(1);

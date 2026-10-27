@@ -517,6 +517,7 @@ impl<'r> Builder<'r> {
     }
 
     fn node_from_spec(&mut self, name: &str, spec_text: &str, base: &str, parent: Id) -> Result<Id, String> {
+        npa::check_name(name)?;
         let spec = npa::parse(name, spec_text)?;
         if let Spec::Directory { path } = &spec {
             let real = npa::resolve_path(base, path);
@@ -693,9 +694,11 @@ impl<'r> Builder<'r> {
 
     /// The queue loop (buildDepStep), until the tree is complete.
     pub fn build_deps(&mut self) -> Result<(), String> {
+        // Warm the cache only for edges that will be resolved; an in-sync
+        // lockfile needs no registry metadata at all.
+        let root = self.t.root;
         let root_names: Vec<String> = self
-            .t
-            .edges_out(self.t.root)
+            .problem_edges(root)
             .iter()
             .filter_map(|&e| {
                 let name = self.t.edges[e].name.clone();
@@ -864,7 +867,8 @@ impl<'r> Builder<'r> {
         }
         if self.meta_from_disk && (self.mutate_tree || self.flags_suspect) {
             for n in self.t.inventory() {
-                if self.t.nodes[n].extraneous && n != self.t.root {
+                // `node.parent = null`: link targets (fsChildren) stay.
+                if self.t.nodes[n].extraneous && n != self.t.root && self.t.nodes[n].parent.is_some() {
                     self.t.detach(n);
                 }
             }

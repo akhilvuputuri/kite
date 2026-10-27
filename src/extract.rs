@@ -51,9 +51,28 @@ fn strip_path(raw: &str) -> Option<String> {
     Some(joined.join("/"))
 }
 
+#[cfg(test)]
 pub fn extract_tgz(data: &[u8], dest: &Path, umask: u32) -> io::Result<Vec<ExtractedFile>> {
-    let decoder = GzDecoder::new(data);
-    let mut archive = tar::Archive::new(decoder);
+    let mut reader = data;
+    extract_stream(&mut reader, dest, umask)
+}
+
+/// Unpacks a gzipped tarball read from `input`, then reads `input` to the
+/// end so that a hash wrapped around it sees every byte.
+pub fn extract_stream<R: Read>(input: &mut R, dest: &Path, umask: u32) -> io::Result<Vec<ExtractedFile>> {
+    let files = {
+        let decoder = GzDecoder::new(&mut *input);
+        let mut archive = tar::Archive::new(decoder);
+        let files = extract_archive(&mut archive, dest, umask)?;
+        let mut decoder = archive.into_inner();
+        io::copy(&mut decoder, &mut io::sink())?;
+        files
+    };
+    io::copy(input, &mut io::sink())?;
+    Ok(files)
+}
+
+fn extract_archive<R: Read>(archive: &mut tar::Archive<R>, dest: &Path, umask: u32) -> io::Result<Vec<ExtractedFile>> {
     archive.set_ignore_zeros(false);
     let mut seen_npmignore: HashSet<String> = HashSet::new();
     let mut made_dirs: HashSet<PathBuf> = HashSet::new();
@@ -120,16 +139,23 @@ fn ensure_dirs(root: &Path, dir: &Path, mode: u32, made: &mut HashSet<PathBuf>) 
             // A file entry earlier in the archive sits where a folder is
             // needed now; node-tar replaces it.
             fs::remove_file(dir)?;
-            fs::create_dir(dir)?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(mode))?;
+            create_dir(dir, mode)?;
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(dir)?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(mode))?;
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => create_dir(dir, mode)?,
         Err(e) => return Err(e),
     }
     made.insert(dir.to_path_buf());
+    Ok(())
+}
+
+/// mkdir with npm's directory mode; a chmod is only needed when the
+/// process umask would not produce that mode by itself.
+fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o777).create(dir)?;
+    if mode != 0o777 & !crate::install::current_umask() {
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode))?;
+    }
     Ok(())
 }
 
@@ -140,7 +166,6 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     {
         fs::remove_dir_all(path)?;
     }
-    let keep_mode = existing.as_ref().is_some_and(|m| m.is_file());
     let mut file: File = OpenOptions::new()
         .write(true)
         .create(true)
@@ -148,9 +173,9 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         .mode(mode)
         .open(path)?;
     file.write_all(contents)?;
-    if !keep_mode {
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
-    }
+    // The kernel applies the process umask to `mode`, which already
+    // includes it, so no chmod is needed. A file that existed keeps its
+    // first mode (node-tar's noChmod).
     Ok(())
 }
 
