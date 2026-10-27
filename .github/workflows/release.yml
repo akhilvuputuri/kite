@@ -112,7 +112,7 @@ jobs:
           cp artifacts/lockstep-*/lockstep-* dist/
           (cd dist && cat *.sha256 > SHA256SUMS && cat SHA256SUMS)
           {
-            sed -n "/^## ${GITHUB_REF_NAME#v}/,/^## /p" CHANGELOG.md | sed '$d'
+            awk -v v="## ${GITHUB_REF_NAME#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md
             echo
             echo "## Benchmarks"
             echo
