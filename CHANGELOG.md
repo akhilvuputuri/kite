@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2
+
+- `kite install`, `uninstall` and `update` now work like `npm install`: they compare the installed
+  tree with the lockfile and only add, replace or remove the packages that differ. Unchanged
+  packages, their bin links and anything else in `node_modules` (such as `.cache`) are left alone.
+  Install scripts run only for added or changed packages. The result stays byte-identical to npm's.
+- A repeated install with nothing to change takes about 40 ms on a 300-package project, against
+  about 430 ms for npm.
+- Like npm, the installed tree is read from `node_modules/.package-lock.json` only when nothing in
+  `node_modules` is newer and every package it lists is present; otherwise each package's
+  `package.json` is read.
+- `kite ci` is unchanged: a clean install.
+
 ## 0.1.1
 
 lockstep is now **Kite**: the repository is `akhilvuputuri/kite`, the command is `kite` and the

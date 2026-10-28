@@ -76,7 +76,7 @@ fn normalize_before(before: &str) -> Result<String, String> {
 
 /// Every package folder in node_modules (including scoped and nested ones)
 /// is no newer than the hidden lockfile.
-fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bool {
+pub fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bool {
     let Ok(written) = fs::metadata(hidden).and_then(|m| m.modified()) else {
         return false;
     };
@@ -107,6 +107,16 @@ fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bo
             }
         }
         true
+    }
+    // A folder whose own timestamp is newer had entries added or removed.
+    let folder_newer = |d: &std::path::Path| {
+        fs::metadata(d)
+            .and_then(|m| m.modified())
+            .map(|m| m > written)
+            .unwrap_or(true)
+    };
+    if folder_newer(nm) {
+        return false;
     }
     walk(nm, written, 0)
 }
@@ -217,7 +227,10 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     if opts.lockfile_only {
         return Ok(());
     }
-    install::ci(&opts.ci)
+    // npm install reifies incrementally and runs the root lifecycle only
+    // when no packages were named.
+    let root_scripts = opts.add.is_empty() && opts.rm.is_empty() && opts.update.is_none();
+    install::reify(&opts.ci, install::Mode::Incremental { root_scripts })
 }
 
 /// Dependency flags of one lockfile location, as npm ci computes them.

@@ -149,3 +149,42 @@ jobs:
       - name: Show differences
         if: failure()
         run: for f in "$PARITY_WORK"/*.diff; do [ -s "$f" ] && { echo "== $f"; head -80 "$f"; }; done; true
+
+  install-incremental:
+    name: npm install parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
+      KITE_STORE: ${{ github.workspace }}/../kite-store
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Build the release binary (static musl on Linux)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - name: Incremental installs match npm install
+        run: |
+          I=harness/install-parity.sh
+          F=tests/fixtures
+          failed=0
+          run() { export PARITY_WORK=$(mktemp -d); "$@" || failed=1; rm -rf "$PARITY_WORK"; }
+          run $I $F/chief "$BIN" noop
+          run $I $F/chief "$BIN" add left-pad
+          run $I $F/pi "$BIN" add-dev -D left-pad
+          run env CMD=uninstall $I $F/chief "$BIN" uninstall pg dotenv
+          run env CMD=update $I $F/chief "$BIN" update zod
+          run env PREPARE='rm -rf node_modules/zod' $I $F/chief "$BIN" deleted
+          run env PREPARE='rm -rf node_modules/@aws-sdk/client-ec2' $I $F/chief "$BIN" deleted-scoped
+          run env PREPARE='mkdir -p node_modules/.cache/x && echo keep > node_modules/.cache/x/f' $I $F/pi "$BIN" keeps-cache left-pad
+          exit $failed
+      - name: A repeated install is a fast no-op
+        run: |
+          d=$(mktemp -d) && cp -R tests/fixtures/chief/. "$d"
+          (cd "$d" && "$BIN" ci --quiet && "$BIN" install --quiet)
+          out=$(cd "$d" && "$BIN" install 2>&1)
+          echo "$out"
+          echo "$out" | grep -q ", 0 placed, 0 removed (0 downloaded)"
