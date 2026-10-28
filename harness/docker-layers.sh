@@ -2,8 +2,9 @@
 # An image build that installs in one step and prunes to production in the
 # next, like Chief's Dockerfile: `kite ci`, then `kite ci --omit=dev` in a
 # new layer. The second step must succeed and reuse the store from the layer
-# below without downloading. Later steps damage a store entry and replace a
-# package with nested node_modules, both from lower layers.
+# below without downloading. Later steps prune dev packages in a layer above a
+# full install (as Chief's Dockerfiles do), damage a store entry, and replace a
+# package with nested node_modules, all from lower layers.
 #
 #   harness/docker-layers.sh <kite-binary> <fixture-dir>
 #
@@ -24,6 +25,9 @@ COPY . .
 RUN kite ci
 # The store from the layer below is reused as it is.
 RUN kite ci --omit=dev 2>&1 | tee /tmp/omit.out && grep -q '(0 downloaded)' /tmp/omit.out
+# Pruning in a later layer, as Chief's Dockerfiles do, removes only dev packages.
+RUN kite ci >/tmp/ci.out 2>&1; s=$?; cat /tmp/ci.out; [ $s = 0 ] && grep -q '(0 downloaded)' /tmp/ci.out
+RUN kite install --omit=dev >/tmp/prune.out 2>&1; s=$?; cat /tmp/prune.out; [ $s = 0 ] && grep -q ', 0 placed, ' /tmp/prune.out && test ! -d node_modules/typescript
 # A damaged entry from a lower layer is discarded in place and fetched again.
 RUN e=$(dirname "$(ls -d /root/.cache/kite/v2/*/*/linked | head -1)") \
  && printf x >> "$e/package/package.json" \
@@ -37,4 +41,4 @@ RUN sed -i 's/"version": "[^"]*"/"version": "0.0.0-changed"/' node_modules/expre
 DOCKERFILE
 docker build -t kite-docker-layers "$ctx"
 docker rmi kite-docker-layers >/dev/null
-echo "docker layers: store reused, damaged entry replaced, nested node_modules kept"
+echo "docker layers: store reused, dev packages pruned, damaged entry replaced, nested node_modules kept"

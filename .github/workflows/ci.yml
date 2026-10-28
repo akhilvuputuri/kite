@@ -198,6 +198,8 @@ jobs:
           run() { export PARITY_WORK=$(mktemp -d); "$@" || failed=1; rm -rf "$PARITY_WORK"; }
           run env KITE_EXPECT=', 0 placed, 0 removed' $I $F/chief "$BIN" noop
           run $I $F/chief "$BIN" add left-pad
+          run env KITE_EXPECT=', 0 placed' $I $F/chief "$BIN" omit-dev --omit=dev
+          run env KITE_EXPECT=', 0 placed' $I $F/pi "$BIN" omit-dev-pi --omit=dev
           run $I $F/pi "$BIN" add-dev -D left-pad
           run env CMD=uninstall $I $F/chief "$BIN" uninstall pg dotenv
           run env CMD=update $I $F/chief "$BIN" update zod
