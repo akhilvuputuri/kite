@@ -26,6 +26,9 @@ lockstep exec tsc --noEmit       # npx tsc --noEmit
 - **Fast.** Verified packages are kept extracted in a content-addressable store, so a warm
   install clones (`clonefile` on macOS) or hard-links (Linux) files instead of unpacking
   tarballs. Registry metadata is fetched in parallel and cached with HTTP revalidation.
+- **Verifiable releases.** Every release binary is built twice and must be byte-identical, is
+  checked against npm before publishing, and carries a SHA-256 checksum and a GitHub build
+  provenance attestation (`gh attestation verify lockstep-linux-x64 -R akhilvuputuri/lockstep`).
 - **One self-contained binary.** No Node.js is needed to install lockstep itself, and it has no
   runtime dependencies beyond the system C library. Release builds ship for Linux x64,
   Linux arm64 and macOS arm64, each with a SHA-256 checksum.
