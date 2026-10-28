@@ -34,9 +34,15 @@ pub struct ResolveOptions {
     pub before: Option<String>,
 }
 
-fn node_version() -> Option<Version> {
-    let out = std::process::Command::new("node").arg("--version").output().ok()?;
-    Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+/// The version of `node` on PATH, asked once per run and only when an
+/// engines check needs it.
+pub fn node_version() -> Option<Version> {
+    static NODE: std::sync::OnceLock<Option<Version>> = std::sync::OnceLock::new();
+    NODE.get_or_init(|| {
+        let out = std::process::Command::new("node").arg("--version").output().ok()?;
+        Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+    })
+    .clone()
 }
 
 /// Normalises `--before` to the registry's `time` format so the strings
@@ -155,7 +161,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
         }
     };
     let before = opts.before.as_deref().map(normalize_before).transpose()?;
-    let reg = Registry::new(opts.ci.store.join("packuments"), node_version(), before);
+    let reg = Registry::new(opts.ci.store.join("packuments"), before);
 
     // `name@tag` is pinned to the tag's version before resolution (npm #add).
     let mut add: Vec<AddRequest> = Vec::new();
@@ -236,7 +242,7 @@ pub fn ci_ideal_flags(
         Ok(Value::Object(m)) => m,
         _ => return Err(format!("{} is not a JSON object", pkg_path.display())),
     };
-    let reg = Registry::new(store.join("packuments"), node_version(), None);
+    let reg = Registry::new(store.join("packuments"), None);
     let mut b = Builder::new(&project, normalize_root_package(raw), Some(lock), &reg, false)?;
     b.apply_requests(&Requests::default())?;
     b.build_deps()?;

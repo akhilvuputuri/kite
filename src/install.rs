@@ -83,8 +83,7 @@ struct Plan {
 
 /// The node version that `node` on PATH reports, for engines checks.
 fn node_version() -> Option<semver::Version> {
-    let out = std::process::Command::new("node").arg("--version").output().ok()?;
-    semver::Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+    crate::resolve::node_version()
 }
 
 fn engines_ok(e: &Entry, node: &mut Option<Option<semver::Version>>) -> bool {
@@ -351,7 +350,13 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     for (&i, integrity) in &integrity_of {
         locations.entry(integrity.store_key()).or_default().push(i);
     }
-    let fetch_jobs = (opts.jobs * 4).clamp(16, 48);
+    // Downloads wait on the network, not the CPU: keep many in flight
+    // regardless of core count (LOCKSTEP_NETWORK_CONCURRENCY overrides).
+    let fetch_jobs = std::env::var("LOCKSTEP_NETWORK_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(64);
     let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
         let key = integrity.store_key();
         let pkg = store.ensure(integrity, url)?;

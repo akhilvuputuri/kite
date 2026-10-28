@@ -4,6 +4,8 @@
 # package-lock.json itself). Prints a Markdown table.
 #
 #   harness/bench.sh <fixture-dir> <lockstep-binary> [runs]
+#
+# BENCH_TOOLS limits the tools measured (default: npm lockstep pnpm bun).
 set -euo pipefail
 fixture=$(cd "$1" && pwd)
 lockstep=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
@@ -44,7 +46,7 @@ time_install() {
 
 echo "| tool | cold (ms) | warm (ms) |"
 echo "| --- | ---: | ---: |"
-for tool in npm lockstep pnpm bun; do
+for tool in ${BENCH_TOOLS:-npm lockstep pnpm bun}; do
   if [ "$tool" != npm ] && [ "$tool" != lockstep ] && ! command -v "$tool" >/dev/null; then
     continue
   fi
