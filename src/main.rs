@@ -22,21 +22,21 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-lockstep — install and run JavaScript packages from package-lock.json
+kite — install and run JavaScript packages from package-lock.json
 
 Usage:
-  lockstep [options] ci [--omit=dev|optional|peer]... [--ignore-scripts]
-  lockstep [options] install [pkg[@spec]...] [-D|-O|-P|--save-peer] [-E] [--lockfile-only]
-  lockstep [options] uninstall <pkg>... [--lockfile-only]
-  lockstep [options] update [pkg...] [--lockfile-only]
-  lockstep [options] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
-  lockstep [options] test [args...]        (also: start)
-  lockstep [options] exec <bin> [--] [args...]
-  lockstep --version
+  kite [options] ci [--omit=dev|optional|peer]... [--ignore-scripts]
+  kite [options] install [pkg[@spec]...] [-D|-O|-P|--save-peer] [-E] [--lockfile-only]
+  kite [options] uninstall <pkg>... [--lockfile-only]
+  kite [options] update [pkg...] [--lockfile-only]
+  kite [options] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
+  kite [options] test [args...]        (also: start)
+  kite [options] exec <bin> [--] [args...]
+  kite --version
 
 Options (before or after the command):
   --prefix DIR, -C DIR   Run in DIR instead of the current directory
-  --store DIR            Package store (default: $LOCKSTEP_STORE or the user cache)
+  --store DIR            Package store (default: $KITE_STORE or the user cache)
   --jobs N               Parallel jobs (default: number of CPUs)
   --quiet                Print nothing on success
 ";
@@ -367,7 +367,7 @@ fn main() -> ExitCode {
     match real_main() {
         Ok(code) => ExitCode::from(code),
         Err(message) => {
-            eprintln!("lockstep: {message}");
+            eprintln!("kite: {message}");
             ExitCode::from(1)
         }
     }

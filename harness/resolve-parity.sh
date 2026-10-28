@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Runs the same dependency command with npm and with lockstep in lockfile-only
+# Runs the same dependency command with npm and with kite in lockfile-only
 # mode and diffs the resulting package-lock.json and package.json.
 #
-#   harness/resolve-parity.sh <fixture-dir> <lockstep-binary> <scenario> <command> [args...]
+#   harness/resolve-parity.sh <fixture-dir> <kite-binary> <scenario> <command> [args...]
 #
 # <command> is install, uninstall or update. The fixture may omit
 # package-lock.json to test a fresh resolution. Set RESOLVE_DROP_LOCK=1 to
@@ -10,7 +10,7 @@
 set -euo pipefail
 
 fixture=$(cd "$1" && pwd)
-lockstep=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+kite=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 scenario=$3
 shift 3
 work=${PARITY_WORK:-$(mktemp -d)}
@@ -27,16 +27,16 @@ prepare() {
 }
 
 npm_dir=$work/$scenario-npm
-ls_dir=$work/$scenario-lockstep
+ls_dir=$work/$scenario-kite
 prepare "$npm_dir"
 prepare "$ls_dir"
 
 start=$(node -e 'console.log(Date.now())')
 (cd "$npm_dir" && npm "$@" --package-lock-only --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null)
 mid=$(node -e 'console.log(Date.now())')
-(cd "$ls_dir" && "$lockstep" --quiet "$@" --lockfile-only)
+(cd "$ls_dir" && "$kite" --quiet "$@" --lockfile-only)
 end=$(node -e 'console.log(Date.now())')
-echo "npm: $((mid - start)) ms, lockstep: $((end - mid)) ms" >&2
+echo "npm: $((mid - start)) ms, kite: $((end - mid)) ms" >&2
 
 status=0
 for f in package-lock.json package.json; do

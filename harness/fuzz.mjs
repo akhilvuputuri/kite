@@ -2,7 +2,7 @@
 // Differential tests against the npm that ships with Node:
 //   node-semver satisfies() with loose parsing, and
 //   localeCompare(b, 'en') ordering.
-// Usage: fuzz.mjs <lockstep-binary> [cases]
+// Usage: fuzz.mjs <kite-binary> [cases]
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -45,7 +45,7 @@ const got = execFileSync(bin, ["__debug", "satisfies"], { input: cases.map((c) =
 let failures = 0;
 for (let i = 0; i < cases.length; i++) {
   if (got[i] !== expected[i]) {
-    if (failures++ < 20) console.log(`semver mismatch: satisfies(${JSON.stringify(cases[i][1])}, ${JSON.stringify(cases[i][0])}) node=${expected[i]} lockstep=${got[i]}`);
+    if (failures++ < 20) console.log(`semver mismatch: satisfies(${JSON.stringify(cases[i][1])}, ${JSON.stringify(cases[i][0])}) node=${expected[i]} kite=${got[i]}`);
   }
 }
 console.log(`semver: ${cases.length} cases, ${failures} mismatches`);
@@ -57,7 +57,7 @@ const mine = execFileSync(bin, ["__debug", "collate"], { input: names.join("\n")
 let collateFailures = 0;
 for (let i = 0; i < sorted.length; i++) {
   if (sorted[i] !== mine[i] && sorted[i].localeCompare(mine[i], "en") !== 0) {
-    if (collateFailures++ < 10) console.log(`collation mismatch at ${i}: node=${JSON.stringify(sorted[i])} lockstep=${JSON.stringify(mine[i])}`);
+    if (collateFailures++ < 10) console.log(`collation mismatch at ${i}: node=${JSON.stringify(sorted[i])} kite=${JSON.stringify(mine[i])}`);
   }
 }
 console.log(`collation: ${names.length} strings, ${collateFailures} mismatches`);

@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use crate::fetch;
 use crate::semver::{Range, Version};
 
-/// npm's resolution also checks `engines.npm`; lockstep mirrors npm 10.9.9.
+/// npm's resolution also checks `engines.npm`; kite mirrors npm 10.9.9.
 pub const NPM_VERSION: &str = "10.9.9";
 
 type Slot = Result<Arc<Value>, String>;
@@ -33,7 +33,6 @@ struct Shared {
 pub struct Registry {
     shared: Arc<Shared>,
     started: Mutex<bool>,
-    pub node_version: Option<Version>,
     pub before: Option<String>,
 }
 
@@ -54,7 +53,7 @@ fn now_secs() -> u64 {
 }
 
 impl Registry {
-    pub fn new(cache_dir: PathBuf, node_version: Option<Version>, before: Option<String>) -> Registry {
+    pub fn new(cache_dir: PathBuf, before: Option<String>) -> Registry {
         Registry {
             shared: Arc::new(Shared {
                 done: Mutex::new(HashMap::new()),
@@ -65,7 +64,6 @@ impl Registry {
                 cache_dir,
             }),
             started: Mutex::new(false),
-            node_version,
             before,
         }
     }
@@ -203,7 +201,7 @@ impl Registry {
             let Some(have) = have else { return true };
             Range::parse(want).is_some_and(|r| r.satisfies_including_prerelease(&have))
         };
-        check(engines.get("node"), self.node_version.clone()) && check(engines.get("npm"), Version::parse(NPM_VERSION))
+        check(engines.get("node"), super::node_version()) && check(engines.get("npm"), Version::parse(NPM_VERSION))
     }
 
     fn is_before(&self, times: Option<&Map<String, Value>>, version: &str) -> bool {

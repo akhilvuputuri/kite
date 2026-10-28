@@ -1,4 +1,4 @@
-//! The dependency spec forms lockstep supports, classified the way
+//! The dependency spec forms kite supports, classified the way
 //! npm-package-arg does for registry and directory specs.
 
 use crate::semver::{Range, Version};

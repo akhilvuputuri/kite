@@ -22,7 +22,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show active-toolchain && cargo --version
       - run: cargo fmt --check
       - run: cargo clippy --locked --release -- -D warnings
@@ -38,15 +38,15 @@ jobs:
         fixture: [chief, pi]
         flags: ["", "--ignore-scripts", "--omit=dev", "--omit=dev --ignore-scripts"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
       - name: Build the release binary (static musl on Linux)
         run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
-      - name: npm ci vs lockstep ci
+      - name: npm ci vs kite ci
         env:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
-          LOCKSTEP_STORE: ${{ runner.temp }}/lockstep-store
+          KITE_STORE: ${{ runner.temp }}/kite-store
           PARITY_WORK: ${{ runner.temp }}/parity
         run: |
           npm --version | grep -qx '10\.9\.[0-9]*' || { echo "expected npm 10.9.x, got $(npm --version)"; exit 1; }
@@ -65,11 +65,11 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
-      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      KITE_STORE: ${{ github.workspace }}/../kite-store
       PARITY_WORK: ${{ github.workspace }}/../resolve-parity
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
       - name: Build the release binary (static musl on Linux)
         run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
@@ -125,15 +125,15 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
-      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      KITE_STORE: ${{ github.workspace }}/../kite-store
       PARITY_WORK: ${{ github.workspace }}/../install-parity
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
       - name: Build the release binary (static musl on Linux)
         run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
-      - name: Lock each fixture with npm, then compare npm ci and lockstep ci
+      - name: Lock each fixture with npm, then compare npm ci and kite ci
         run: |
           failed=0
           for d in tests/fixtures/resolve/*/; do

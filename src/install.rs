@@ -1,4 +1,4 @@
-//! `lockstep ci`: install exactly what `package-lock.json` describes.
+//! `kite ci`: install exactly what `package-lock.json` describes.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -83,8 +83,7 @@ struct Plan {
 
 /// The node version that `node` on PATH reports, for engines checks.
 fn node_version() -> Option<semver::Version> {
-    let out = std::process::Command::new("node").arg("--version").output().ok()?;
-    semver::Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+    crate::resolve::node_version()
 }
 
 fn engines_ok(e: &Entry, node: &mut Option<Option<semver::Version>>) -> bool {
@@ -206,16 +205,26 @@ fn link_target<'a>(lock: &'a Lockfile, e: &Entry) -> Option<&'a Entry> {
     lock.entries.iter().find(|t| t.path == target)
 }
 
+/// How many downloads run at once: KITE_NETWORK_CONCURRENCY, default 64.
+pub fn network_concurrency() -> Result<usize, String> {
+    match std::env::var("KITE_NETWORK_CONCURRENCY") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("KITE_NETWORK_CONCURRENCY={v:?} is not a positive number")),
+        },
+        Err(_) => Ok(64),
+    }
+}
+
 pub fn ci(opts: &CiOptions) -> Result<(), String> {
     let started = Instant::now();
-    let timing = std::env::var_os("LOCKSTEP_TIMING").is_some();
+    // Configuration errors must surface before node_modules is touched.
+    let network_concurrency = network_concurrency()?;
+    let timing = std::env::var_os("KITE_TIMING").is_some();
     let mut last = Instant::now();
     let mut mark = |label: &str| {
         if timing {
-            eprintln!(
-                "lockstep: {label:<14} {:>7.1} ms",
-                last.elapsed().as_secs_f64() * 1000.0
-            );
+            eprintln!("kite: {label:<14} {:>7.1} ms", last.elapsed().as_secs_f64() * 1000.0);
             last = Instant::now();
         }
     };
@@ -351,7 +360,9 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     for (&i, integrity) in &integrity_of {
         locations.entry(integrity.store_key()).or_default().push(i);
     }
-    let fetch_jobs = (opts.jobs * 4).clamp(16, 48);
+    // Downloads wait on the network, not the CPU: keep many in flight
+    // regardless of core count (KITE_NETWORK_CONCURRENCY overrides).
+    let fetch_jobs = network_concurrency;
     let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
         let key = integrity.store_key();
         let pkg = store.ensure(integrity, url)?;
@@ -365,7 +376,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     if timing {
         use std::sync::atomic::Ordering::Relaxed;
         eprintln!(
-            "lockstep:   (thread time: download+unpack {} ms, {} MB, {} store entries replaced)",
+            "kite:   (thread time: download+unpack {} ms, {} MB, {} store entries replaced)",
             crate::store::DOWNLOAD_US.load(Relaxed) / 1000,
             crate::store::BYTES.load(Relaxed) / 1_000_000,
             crate::store::TAMPERED.load(Relaxed)
@@ -557,7 +568,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
 
     if !opts.quiet {
         eprintln!(
-            "lockstep: installed {} packages ({} downloaded) in {:.2}s",
+            "kite: installed {} packages ({} downloaded) in {:.2}s",
             plan.install.len(),
             downloaded,
             started.elapsed().as_secs_f64()

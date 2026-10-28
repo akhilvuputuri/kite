@@ -1,9 +1,9 @@
 //! npm configuration that changes what gets installed: `npm_config_*`
 //! environment variables, the project and user `.npmrc`, and `NODE_ENV`.
 //!
-//! Settings lockstep implements are applied. Settings that only affect
+//! Settings kite implements are applied. Settings that only affect
 //! npm's own output, caching or credentials are ignored. Anything else that
-//! would make npm behave differently is refused, so lockstep never quietly
+//! would make npm behave differently is refused, so kite never quietly
 //! produces a different result.
 
 use std::collections::BTreeMap;
@@ -151,7 +151,7 @@ fn read_layer(path: Option<std::path::PathBuf>, label: &str) -> BTreeMap<String,
 impl Config {
     /// Reads npm's configuration layers (global, user, project npmrc and the
     /// environment; the command line is applied by `omit`) and refuses
-    /// settings lockstep does not implement.
+    /// settings kite does not implement.
     pub fn load(project: &Path, cli: &Cli) -> Result<Config, String> {
         // @npmcli/config: the environment and the project .npmrc can name
         // the user config, and they plus the user config can name the
@@ -283,7 +283,7 @@ impl Config {
         c.omit_peer = omitted("peer");
         if !refused.is_empty() {
             return Err(format!(
-                "these npm settings would change npm's result, and lockstep does not support them yet:\n  {}",
+                "these npm settings would change npm's result, and kite does not support them yet:\n  {}",
                 refused.join("\n  ")
             ));
         }

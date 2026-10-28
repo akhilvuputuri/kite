@@ -18,7 +18,7 @@ fn agent() -> &'static Agent {
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_recv_body(Some(Duration::from_secs(300)))
-            .user_agent(concat!("lockstep/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("kite/", env!("CARGO_PKG_VERSION")))
             .proxy(ureq::Proxy::try_from_env())
             // Keep one warm connection per download worker.
             .max_idle_connections(256)

@@ -1,12 +1,16 @@
 [package]
-name = "lockstep"
-version = "0.1.0"
+name = "kite-pm"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast, npm-compatible JavaScript package manager: install, resolve and run with byte-identical npm results"
 license = "MIT"
-repository = "https://github.com/akhilvuputuri/lockstep"
+repository = "https://github.com/akhilvuputuri/kite"
 publish = false
+
+[[bin]]
+name = "kite"
+path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"

@@ -707,7 +707,7 @@ impl Range {
 }
 
 /// `semver.subset(sub, dom)`: every version matching `sub` matches `dom`.
-/// Prerelease subtleties are ignored; lockstep only uses this to choose
+/// Prerelease subtleties are ignored; kite only uses this to choose
 /// the saved spec of an added dependency.
 pub fn subset(sub: &str, dom: &str) -> bool {
     let (Some(s), Some(d)) = (Range::parse(sub), Range::parse(dom)) else {

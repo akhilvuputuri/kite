@@ -45,7 +45,7 @@ impl Platform {
 }
 
 /// npm-install-checks current-env.js: the host's C library, from the text
-/// of /usr/bin/ldd. A static lockstep binary cannot ask its own runtime, so
+/// of /usr/bin/ldd. A static kite binary cannot ask its own runtime, so
 /// when ldd is unreadable it looks for the dynamic loaders instead.
 fn detect_libc() -> Option<String> {
     if let Ok(bytes) = std::fs::read("/usr/bin/ldd") {

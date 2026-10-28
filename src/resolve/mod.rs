@@ -1,4 +1,4 @@
-//! `lockstep install`, `uninstall` and `update`: resolve package.json into
+//! `kite install`, `uninstall` and `update`: resolve package.json into
 //! a package-lock.json the way npm 10.9 does, then install it.
 
 mod build;
@@ -34,9 +34,15 @@ pub struct ResolveOptions {
     pub before: Option<String>,
 }
 
-fn node_version() -> Option<Version> {
-    let out = std::process::Command::new("node").arg("--version").output().ok()?;
-    Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+/// The version of `node` on PATH, asked once per run and only when an
+/// engines check needs it.
+pub fn node_version() -> Option<Version> {
+    static NODE: std::sync::OnceLock<Option<Version>> = std::sync::OnceLock::new();
+    NODE.get_or_init(|| {
+        let out = std::process::Command::new("node").arg("--version").output().ok()?;
+        Version::parse(String::from_utf8_lossy(&out.stdout).trim())
+    })
+    .clone()
 }
 
 /// Normalises `--before` to the registry's `time` format so the strings
@@ -106,6 +112,8 @@ fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bo
 }
 
 pub fn run(opts: ResolveOptions) -> Result<(), String> {
+    // Fail on configuration errors before package.json or the lockfile change.
+    install::network_concurrency()?;
     let dir = opts.ci.dir.clone();
     let project = dir.to_string_lossy().trim_end_matches('/').to_string();
     let pkg_path = dir.join("package.json");
@@ -116,7 +124,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     };
     for unsupported in ["overrides", "workspaces", "bundleDependencies", "bundledDependencies"] {
         if raw_pkg.contains_key(unsupported) {
-            return Err(format!("package.json \"{unsupported}\" is not supported by lockstep"));
+            return Err(format!("package.json \"{unsupported}\" is not supported by kite"));
         }
     }
     if dir.join("npm-shrinkwrap.json").exists() {
@@ -128,7 +136,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     } else {
         // Without a lockfile npm starts from what is installed (loadActual).
         // node_modules/.package-lock.json records exactly that; without it
-        // lockstep refuses rather than resolve differently.
+        // kite refuses rather than resolve differently.
         let hidden = dir.join("node_modules/.package-lock.json");
         if hidden.exists() {
             // Arborist trusts the hidden lockfile only when nothing in
@@ -146,7 +154,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
             .unwrap_or(false)
         {
             return Err(
-                "there is no package-lock.json, and node_modules was not installed by npm or lockstep; \
+                "there is no package-lock.json, and node_modules was not installed by npm or kite; \
                         remove node_modules or restore package-lock.json"
                     .into(),
             );
@@ -155,7 +163,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
         }
     };
     let before = opts.before.as_deref().map(normalize_before).transpose()?;
-    let reg = Registry::new(opts.ci.store.join("packuments"), node_version(), before);
+    let reg = Registry::new(opts.ci.store.join("packuments"), before);
 
     // `name@tag` is pinned to the tag's version before resolution (npm #add).
     let mut add: Vec<AddRequest> = Vec::new();
@@ -202,7 +210,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     if !opts.ci.quiet {
         let count = b.t.inventory().len().saturating_sub(1);
         eprintln!(
-            "lockstep: {} package-lock.json ({count} entries)",
+            "kite: {} package-lock.json ({count} entries)",
             if changed { "wrote" } else { "kept" }
         );
     }
@@ -236,7 +244,7 @@ pub fn ci_ideal_flags(
         Ok(Value::Object(m)) => m,
         _ => return Err(format!("{} is not a JSON object", pkg_path.display())),
     };
-    let reg = Registry::new(store.join("packuments"), node_version(), None);
+    let reg = Registry::new(store.join("packuments"), None);
     let mut b = Builder::new(&project, normalize_root_package(raw), Some(lock), &reg, false)?;
     b.apply_requests(&Requests::default())?;
     b.build_deps()?;
@@ -280,8 +288,8 @@ pub fn ci_ideal_flags(
     }
     if !errors.is_empty() {
         return Err(format!(
-            "`lockstep ci` can only install packages when package.json and package-lock.json are in sync. \
-             Update the lock file with `lockstep install` before continuing.\n\n{}",
+            "`kite ci` can only install packages when package.json and package-lock.json are in sync. \
+             Update the lock file with `kite install` before continuing.\n\n{}",
             errors.join("\n")
         ));
     }

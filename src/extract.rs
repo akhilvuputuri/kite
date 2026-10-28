@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn extracts_with_npm_rules() {
-        let dir = std::env::temp_dir().join(format!("lockstep-extract-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kite-extract-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let data = tgz(&[
