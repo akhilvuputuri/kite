@@ -150,6 +150,30 @@ jobs:
         if: failure()
         run: for f in "$PARITY_WORK"/*.diff; do [ -s "$f" ] && { echo "== $f"; head -80 "$f"; }; done; true
 
+  docker-layers:
+    name: Docker image layers (containerd snapshotter, legacy builder)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the release binary (static musl)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      # A fresh Docker 29 install (such as Chief's host) uses the containerd
+      # image store, whose overlay mounts cannot rename lower-layer folders.
+      - name: Use the containerd image store
+        run: |
+          f=/etc/docker/daemon.json
+          { [ -s $f ] && sudo cat $f || echo '{}'; } | jq '.features["containerd-snapshotter"] = true' | sudo tee $f.new >/dev/null
+          sudo mv $f.new $f
+          # Without redirect_dir, renaming a lower-layer folder fails (EXDEV),
+          # as on Chief's host. The runner's kernel enables it by default, so
+          # new overlay mounts are switched to the host's setting.
+          echo N | sudo tee /sys/module/overlay/parameters/redirect_dir
+          test "$(cat /sys/module/overlay/parameters/redirect_dir)" = N
+          sudo systemctl restart docker
+          docker info --format '{{.Driver}} {{json .DriverStatus}}' | tee /dev/stderr | grep -q containerd.snapshotter
+      - name: A later build step reuses the store from the layer below
+        run: DOCKER_BUILDKIT=0 harness/docker-layers.sh "$BIN" tests/fixtures/chief
+
   install-incremental:
     name: npm install parity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3
+
+- Multi-step Docker builds work on Docker's containerd image store (the default for a fresh
+  Docker 29 install). `kite ci` in one build step followed by `kite ci --omit=dev` in the next
+  failed there: image layers keep file times only to the second, so Kite treated its store as
+  modified and then could not rename the store folder, because overlayfs without `redirect_dir`
+  refuses to rename a folder from a lower layer. Kite now accepts times kept to the second, and
+  removes a store entry in place when it cannot be renamed. Confirmed on Chief's host, where the
+  step failed with `cannot replace damaged store entry …: Cross-device link (os error 18)`.
+- The later step reuses the store instead of downloading every package again.
+- `kite install` in a later build step keeps a replaced package's nested `node_modules` in place
+  when overlayfs refuses to move it, instead of failing. An interrupted in-place removal of a store
+  entry can no longer leave a partial entry that is trusted.
+- New CI check: an image build on the containerd image store with the legacy builder, covering
+  store reuse across layers, a damaged lower-layer entry, and replacing a package with nested
+  `node_modules`.
+
 ## 0.1.2
 
 - `kite install`, `uninstall` and `update` now work like `npm install`: they compare the installed
