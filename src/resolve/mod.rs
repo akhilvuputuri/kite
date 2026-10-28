@@ -112,6 +112,8 @@ fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bo
 }
 
 pub fn run(opts: ResolveOptions) -> Result<(), String> {
+    // Fail on configuration errors before package.json or the lockfile change.
+    install::network_concurrency()?;
     let dir = opts.ci.dir.clone();
     let project = dir.to_string_lossy().trim_end_matches('/').to_string();
     let pkg_path = dir.join("package.json");

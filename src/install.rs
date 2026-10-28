@@ -205,8 +205,21 @@ fn link_target<'a>(lock: &'a Lockfile, e: &Entry) -> Option<&'a Entry> {
     lock.entries.iter().find(|t| t.path == target)
 }
 
+/// How many downloads run at once: KITE_NETWORK_CONCURRENCY, default 64.
+pub fn network_concurrency() -> Result<usize, String> {
+    match std::env::var("KITE_NETWORK_CONCURRENCY") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("KITE_NETWORK_CONCURRENCY={v:?} is not a positive number")),
+        },
+        Err(_) => Ok(64),
+    }
+}
+
 pub fn ci(opts: &CiOptions) -> Result<(), String> {
     let started = Instant::now();
+    // Configuration errors must surface before node_modules is touched.
+    let network_concurrency = network_concurrency()?;
     let timing = std::env::var_os("KITE_TIMING").is_some();
     let mut last = Instant::now();
     let mut mark = |label: &str| {
@@ -349,13 +362,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     }
     // Downloads wait on the network, not the CPU: keep many in flight
     // regardless of core count (KITE_NETWORK_CONCURRENCY overrides).
-    let fetch_jobs = match std::env::var("KITE_NETWORK_CONCURRENCY") {
-        Ok(v) => match v.parse::<usize>() {
-            Ok(n) if n > 0 => n,
-            _ => return Err(format!("KITE_NETWORK_CONCURRENCY={v:?} is not a positive number")),
-        },
-        Err(_) => 64,
-    };
+    let fetch_jobs = network_concurrency;
     let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
         let key = integrity.store_key();
         let pkg = store.ensure(integrity, url)?;
