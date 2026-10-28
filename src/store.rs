@@ -246,7 +246,16 @@ impl Store {
             // overlayfs without redirect_dir (Docker's containerd snapshotter)
             // cannot rename a folder that came from a lower image layer, so
             // the entry is removed where it is.
-            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => fs::remove_dir_all(dir),
+            // The index goes first: if removal stops part-way, the entry
+            // reads as unreadable and is discarded again, never trusted.
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                match fs::remove_file(dir.join("index")) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+                fs::remove_dir_all(dir)
+            }
             Err(e) => Err(e),
         }
     }

@@ -640,20 +640,30 @@ pub fn reify(opts: &CiOptions, mode: Mode, previous: Option<&Lockfile>) -> Resul
         // the path would reach the link target's own node_modules.
         let nested = dest.join("node_modules");
         let is_real_dir = fs::symlink_metadata(&dest).is_ok_and(|m| m.is_dir());
-        let kept = if !e.link && is_real_dir && fs::symlink_metadata(&nested).is_ok_and(|m| m.is_dir()) {
+        let mut kept = None;
+        let mut kept_in_place = false;
+        if !e.link && is_real_dir && fs::symlink_metadata(&nested).is_ok_and(|m| m.is_dir()) {
             let aside = dest.with_file_name(format!(
                 ".{}.kite-nested-{}-{}",
                 dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg"),
                 std::process::id(),
                 ASIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
-            fs::rename(&nested, &aside).map_err(|err| format!("{}: {err}", nested.display()))?;
-            Some(aside)
-        } else {
-            None
-        };
+            match fs::rename(&nested, &aside) {
+                Ok(()) => kept = Some(aside),
+                // overlayfs without redirect_dir (Docker's containerd image
+                // store) cannot move a folder from a lower image layer, so the
+                // children stay where they are and only the rest is replaced.
+                Err(err) if err.kind() == io::ErrorKind::CrossesDevices => kept_in_place = true,
+                Err(err) => return Err(format!("{}: {err}", nested.display())),
+            }
+        }
         let replace = || -> Result<(), String> {
-            remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+            if kept_in_place {
+                remove_contents_except(&dest, "node_modules").map_err(|err| format!("{}: {err}", dest.display()))?;
+            } else {
+                remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+            }
             // The old version's bin links and the new one's are recreated,
             // so targets are made executable again and dropped bins vanish.
             if let Some(nm) = bins::node_modules_of(&e.path) {
@@ -950,6 +960,17 @@ pub fn reify(opts: &CiOptions, mode: Mode, previous: Option<&Lockfile>) -> Resul
             downloaded,
             started.elapsed().as_secs_f64()
         );
+    }
+    Ok(())
+}
+
+/// Removes everything in `dir` except the child named `keep`.
+fn remove_contents_except(dir: &Path, keep: &str) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() != keep {
+            remove_path(&entry.path())?;
+        }
     }
     Ok(())
 }
