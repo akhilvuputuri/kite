@@ -74,41 +74,98 @@ fn normalize_before(before: &str) -> Result<String, String> {
     Ok(format!("{date_time}.{:0<3}Z", &frac[..frac.len().min(3)]))
 }
 
-/// Every package folder in node_modules (including scoped and nested ones)
-/// is no newer than the hidden lockfile.
-fn hidden_lockfile_current(nm: &std::path::Path, hidden: &std::path::Path) -> bool {
-    let Ok(written) = fs::metadata(hidden).and_then(|m| m.modified()) else {
+/// arborist `assertNoNewer`: the hidden lockfile describes node_modules
+/// only if no folder it walks (node_modules, scopes, packages, nested
+/// node_modules and symlinked targets) is newer than the hidden lockfile,
+/// every package folder is listed in it, and every listed package was found.
+/// Names starting with `.` and plain files are ignored.
+pub fn hidden_lockfile_current(project: &std::path::Path, hidden: &std::path::Path) -> bool {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    let Ok(lock_time) = fs::metadata(hidden).and_then(|m| m.modified()) else {
         return false;
     };
-    fn walk(dir: &std::path::Path, written: std::time::SystemTime, depth: usize) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else { return true };
+    let Ok(data) = Lockfile::read(hidden) else { return false };
+    let listed: HashSet<String> = data.entries.iter().map(|e| e.path.clone()).collect();
+    let root = match fs::canonicalize(project) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(&root)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        lock_time: std::time::SystemTime,
+        listed: &HashSet<String>,
+        seen: &mut HashSet<String>,
+        rel: &dyn Fn(&Path) -> String,
+        depth: usize,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        let base = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let is_nm = base == "node_modules";
+        let is_scope = base.starts_with('@');
+        let here = rel(dir);
+        seen.insert(here.clone());
+        match fs::metadata(dir).and_then(|m| m.modified()) {
+            Ok(t) if t <= lock_time => {}
+            _ => return false,
+        }
+        if !is_scope && !is_nm && !listed.contains(&here) {
+            return false;
+        }
+        let parent: PathBuf = if is_nm || is_scope {
+            dir.to_path_buf()
+        } else {
+            dir.join("node_modules")
+        };
+        let Ok(entries) = fs::read_dir(&parent) else {
+            return true;
+        };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name == ".package-lock.json" || name == ".bin" {
-                continue;
-            }
-            let path = entry.path();
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                return false;
-            };
-            if meta.modified().map(|m| m > written).unwrap_or(true) {
-                return false;
-            }
-            if meta.is_dir() && depth < 32 {
-                let nested = if name.starts_with('@') {
-                    path.clone()
-                } else {
-                    path.join("node_modules")
-                };
-                if !walk(&nested, written, depth + 1) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(ft) = entry.file_type() else { continue };
+            let child = parent.join(&name);
+            if ft.is_dir() && !name.starts_with('.') {
+                if !walk(&child, root, lock_time, listed, seen, rel, depth + 1) {
+                    return false;
+                }
+            } else if ft.is_symlink() {
+                seen.insert(rel(&child));
+                if let Ok(target) = fs::canonicalize(&child)
+                    && target.is_dir()
+                    && target.starts_with(root)
+                    && !seen.contains(&rel(&target))
+                    && !walk(&target, root, lock_time, listed, seen, rel, depth + 1)
+                {
                     return false;
                 }
             }
         }
         true
     }
-    walk(nm, written, 0)
+    let mut seen = HashSet::new();
+    if !walk(
+        &root.join("node_modules"),
+        &root,
+        lock_time,
+        &listed,
+        &mut seen,
+        &rel,
+        0,
+    ) {
+        return false;
+    }
+    listed.iter().all(|loc| seen.contains(loc))
 }
 
 pub fn run(opts: ResolveOptions) -> Result<(), String> {
@@ -141,7 +198,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
         if hidden.exists() {
             // Arborist trusts the hidden lockfile only when nothing in
             // node_modules changed after it was written.
-            if !hidden_lockfile_current(&dir.join("node_modules"), &hidden) {
+            if !hidden_lockfile_current(&dir, &hidden) {
                 return Err(
                     "there is no package-lock.json, and node_modules changed after it was last installed; \
                             remove node_modules or restore package-lock.json"
@@ -217,7 +274,21 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     if opts.lockfile_only {
         return Ok(());
     }
-    install::ci(&opts.ci)
+    // npm install reifies incrementally and runs the root lifecycle only
+    // when no packages were named.
+    let root_scripts = opts.add.is_empty() && opts.rm.is_empty() && opts.update.is_none();
+    let command = if !opts.rm.is_empty() {
+        "uninstall"
+    } else if opts.update.is_some() {
+        "update"
+    } else {
+        "install"
+    };
+    install::reify(
+        &opts.ci,
+        install::Mode::Incremental { root_scripts, command },
+        lock.as_ref(),
+    )
 }
 
 /// Dependency flags of one lockfile location, as npm ci computes them.
@@ -294,4 +365,40 @@ pub fn ci_ideal_flags(
         ));
     }
     Ok(flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_lockfile_current;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn freshness_ignores_dot_folders_but_not_unlisted_packages() {
+        let dir = std::env::temp_dir().join(format!("kite-fresh-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let nm = dir.join("node_modules");
+        fs::create_dir_all(nm.join("a")).unwrap();
+        fs::create_dir_all(nm.join(".vite/deps")).unwrap();
+        let hidden = nm.join(".package-lock.json");
+        fs::write(
+            &hidden,
+            r#"{"name":"x","lockfileVersion":3,"requires":true,"packages":{"node_modules/a":{"version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let later = SystemTime::now() + Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&hidden)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        // A tool cache changing inside a dot folder keeps the tree current.
+        fs::write(nm.join(".vite/deps/x"), "").unwrap();
+        assert!(hidden_lockfile_current(&dir, &hidden));
+        // A package the hidden lockfile does not list makes it stale.
+        fs::create_dir_all(nm.join("b")).unwrap();
+        assert!(!hidden_lockfile_current(&dir, &hidden));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

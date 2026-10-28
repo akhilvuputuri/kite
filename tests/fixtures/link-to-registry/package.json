@@ -1,0 +1,7 @@
+{
+  "name": "link-to-registry",
+  "version": "1.0.0",
+  "dependencies": {
+    "left-pad": "file:./vendor/left-pad"
+  }
+}

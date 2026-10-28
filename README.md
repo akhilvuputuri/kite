@@ -77,6 +77,9 @@ scripts off, [bench workflow](.github/workflows/bench.yml)):
 | **Kite** | 1.35 s | **0.29 s** |
 | Bun 1.2 | **0.96 s** | 0.41 s |
 
+A repeated `kite install` with nothing to change is a no-op: about 40 ms against npm's 430 ms
+(macOS, same project).
+
 On Linux arm64 the same run measured Kite at 0.80 s cold and 0.19 s warm, and Bun at 0.56 s and
 0.20 s.
 
