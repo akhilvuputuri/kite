@@ -4,6 +4,7 @@ name: bench
 on:
   pull_request:
     branches: [main]
+    paths: ["src/**", "harness/**", "Cargo.*", ".github/workflows/bench.yml"]
   workflow_dispatch:
 permissions:
   contents: read

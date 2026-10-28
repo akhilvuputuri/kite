@@ -41,10 +41,8 @@ impl Store {
 
     pub fn default_root() -> PathBuf {
         // LOCKSTEP_STORE is the 0.1.0 name, still honoured for one release.
-        if let Some(dir) = std::env::var_os("KITE_STORE")
-            .or_else(|| std::env::var_os("LOCKSTEP_STORE"))
-            .filter(|v| !v.is_empty())
-        {
+        let set = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+        if let Some(dir) = set("KITE_STORE").or_else(|| set("LOCKSTEP_STORE")) {
             return PathBuf::from(dir);
         }
         if let Some(dir) = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {

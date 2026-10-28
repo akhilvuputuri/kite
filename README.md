@@ -59,9 +59,10 @@ Both are fast, native package managers. They make different promises.
 - It keeps `package-lock.json` and produces npm's `node_modules` byte for byte. Bun converts to
   `bun.lock` and builds a slightly different tree. Teammates, CI and anything else that reads
   `package-lock.json` keep working, and you can switch back to npm at any time.
-- Warm installs, which CI caches and Docker rebuilds mostly hit, are faster than Bun's.
-- Dependency install scripts run exactly as npm runs them. Bun skips them for packages that
-  are not on its trusted list.
+- Warm installs, which CI caches and Docker rebuilds mostly hit, match or beat Bun's (about
+  30% faster on Linux x64, on par on Linux arm64).
+- Dependency install scripts run exactly as npm runs them. By default Bun runs them only for
+  packages on its trusted list.
 - Anything it cannot reproduce exactly is refused with a clear error instead of approximated.
 
 **Choose Bun** when you want its wider toolkit: it is also a runtime, test runner and bundler,
@@ -75,6 +76,9 @@ scripts off, [bench workflow](.github/workflows/bench.yml)):
 | npm 10.9 | ~9 s | ~7 s |
 | **Kite** | 1.35 s | **0.29 s** |
 | Bun 1.2 | **0.96 s** | 0.41 s |
+
+On Linux arm64 the same run measured Kite at 0.80 s cold and 0.19 s warm, and Bun at 0.56 s and
+0.20 s.
 
 ## Proven compatibility
 
@@ -113,7 +117,8 @@ bin-links' conflict order and CRLF shebang fix, the lifecycle script phases, and
 | `exec <bin> [--] [args...]` | Run a binary from `node_modules/.bin` |
 
 Global options: `--prefix DIR` (or `-C DIR`), `--store DIR` (default `$KITE_STORE` or the
-user cache directory), `--jobs N`, `--quiet`. `install` also takes `--before DATE`.
+user cache directory), `--jobs N` (CPU work), `--quiet`. `KITE_NETWORK_CONCURRENCY` sets how many
+downloads run at once (default 64). `install` also takes `--before DATE`.
 
 ## Roadmap
 

@@ -349,11 +349,13 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     }
     // Downloads wait on the network, not the CPU: keep many in flight
     // regardless of core count (KITE_NETWORK_CONCURRENCY overrides).
-    let fetch_jobs = std::env::var("KITE_NETWORK_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(64);
+    let fetch_jobs = match std::env::var("KITE_NETWORK_CONCURRENCY") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => return Err(format!("KITE_NETWORK_CONCURRENCY={v:?} is not a positive number")),
+        },
+        Err(_) => 64,
+    };
     let stored = pool::map(&unique, fetch_jobs, |(integrity, url)| {
         let key = integrity.store_key();
         let pkg = store.ensure(integrity, url)?;
