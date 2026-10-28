@@ -25,7 +25,8 @@ RUN kite ci
 # The store from the layer below is reused as it is.
 RUN kite ci --omit=dev 2>&1 | tee /tmp/omit.out && grep -q '(0 downloaded)' /tmp/omit.out
 # Pruning in a later layer, as Chief's Dockerfiles do, removes only dev packages.
-RUN kite ci && kite install --omit=dev 2>&1 | tee /tmp/prune.out && grep -q ', 0 placed, ' /tmp/prune.out && test ! -d node_modules/typescript
+RUN kite ci
+RUN kite install --omit=dev 2>&1 | tee /tmp/prune.out && grep -q ', 0 placed, ' /tmp/prune.out && test ! -d node_modules/typescript
 # A damaged entry from a lower layer is discarded in place and fetched again.
 RUN e=$(dirname "$(ls -d /root/.cache/kite/v2/*/*/linked | head -1)") \
  && printf x >> "$e/package/package.json" \
