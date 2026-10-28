@@ -366,3 +366,39 @@ pub fn ci_ideal_flags(
     }
     Ok(flags)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_lockfile_current;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn freshness_ignores_dot_folders_but_not_unlisted_packages() {
+        let dir = std::env::temp_dir().join(format!("kite-fresh-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let nm = dir.join("node_modules");
+        fs::create_dir_all(nm.join("a")).unwrap();
+        fs::create_dir_all(nm.join(".vite/deps")).unwrap();
+        let hidden = nm.join(".package-lock.json");
+        fs::write(
+            &hidden,
+            r#"{"name":"x","lockfileVersion":3,"requires":true,"packages":{"node_modules/a":{"version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let later = SystemTime::now() + Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&hidden)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        // A tool cache changing inside a dot folder keeps the tree current.
+        fs::write(nm.join(".vite/deps/x"), "").unwrap();
+        assert!(hidden_lockfile_current(&dir, &hidden));
+        // A package the hidden lockfile does not list makes it stale.
+        fs::create_dir_all(nm.join("b")).unwrap();
+        assert!(!hidden_lockfile_current(&dir, &hidden));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

@@ -13,6 +13,8 @@
 - A repeated install with nothing to change takes about 40 ms on a 300-package project, against
   about 430 ms for npm.
 - Replacing a linked package with a registry package never touches the link target's folder.
+  A linked folder's own `node_modules` is only checked while the link to it exists, as in npm.
+- On case-insensitive filesystems (macOS), a package whose folder name changed case is kept.
 - `kite ci` is unchanged: a clean install.
 
 ## 0.1.1

@@ -6,6 +6,7 @@
 #   harness/install-parity.sh <fixture-dir> <kite-binary> <scenario> [install args...]
 #
 # CMD selects the command (install, uninstall, update; default install).
+# BASE_PREPARE is a shell snippet run once after npm ci, before the copies.
 # PREPARE is a shell snippet run in each copy before the command.
 # KITE_EXPECT is a grep -E pattern Kite's summary line must match
 # (for example ", 1 placed, 0 removed").
@@ -19,7 +20,7 @@ work=${PARITY_WORK:-$(mktemp -d)}
 mkdir -p "$work"
 base=$work/$scenario-base
 rm -rf "$base" && cp -R "$fixture" "$base"
-(cd "$base" && npm ci --no-audit --no-fund --loglevel=error >/dev/null)
+(cd "$base" && npm ci --no-audit --no-fund --loglevel=error >/dev/null && eval "${BASE_PREPARE:-true}")
 roots() {
   node -e '
     const lock = require(process.argv[1]);
@@ -35,7 +36,11 @@ for tool in npm kite; do
   if [ "$tool" = npm ]; then
     (cd "$dest" && eval "${PREPARE:-true}" && npm "${CMD:-install}" --no-audit --no-fund --loglevel=error "$@" >/dev/null)
   else
-    (cd "$dest" && eval "${PREPARE:-true}" && "$kite" "${CMD:-install}" "$@" 2>"$work/$scenario-kite.out")
+    if ! (cd "$dest" && eval "${PREPARE:-true}" && "$kite" "${CMD:-install}" "$@" 2>"$work/$scenario-kite.out"); then
+      echo "install parity: $scenario — kite failed:"
+      cat "$work/$scenario-kite.out"
+      exit 1
+    fi
     if [ -n "${KITE_EXPECT:-}" ] && ! grep -Eq "$KITE_EXPECT" "$work/$scenario-kite.out"; then
       echo "install parity: $scenario — kite did not match /$KITE_EXPECT/:"
       tail -2 "$work/$scenario-kite.out"

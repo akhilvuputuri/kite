@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -296,11 +297,25 @@ fn load_actual(dir: &Path, local_roots: &[String], previous: Option<&Lockfile>) 
             })
             .collect();
     }
+    // loadActual reaches a project folder only through a link on disk; with
+    // the link gone, that folder's node_modules is not part of the tree.
     let mut out = HashMap::new();
-    let mut walk_roots: Vec<String> = vec![String::new()];
-    walk_roots.extend(local_roots.iter().cloned());
-    for root in walk_roots {
-        scan_node_modules(dir, &root, &mut out);
+    scan_node_modules(dir, "", &mut out);
+    let mut walked: HashSet<String> = HashSet::new();
+    loop {
+        let next: Vec<String> = out
+            .values()
+            .filter_map(|a| a.link.clone())
+            .filter(|t| local_roots.contains(t) && !walked.contains(t))
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        for target in next {
+            if walked.insert(target.clone()) {
+                scan_node_modules(dir, &target, &mut out);
+            }
+        }
     }
     // Shrinkwrap.add: package-lock.json supplies resolved and integrity for
     // each installed package whose version matches, so only packages that
@@ -666,7 +681,7 @@ pub fn reify(opts: &CiOptions, mode: Mode, previous: Option<&Lockfile>) -> Resul
             }
             if let Err(err) = fs::rename(aside, &nested) {
                 return Err(format!(
-                    "{}: could not restore {} ({err}); it is kept at {}",
+                    "{}: could not restore {} ({err}); it is at {} until the next install",
                     e.path,
                     nested.display(),
                     aside.display()
@@ -709,10 +724,26 @@ pub fn reify(opts: &CiOptions, mode: Mode, previous: Option<&Lockfile>) -> Resul
     let downloaded = stored.iter().filter(|(_, p)| p.downloaded).count();
     let stored: HashMap<String, crate::store::StoredPackage> = stored.into_iter().collect();
 
-    // Downloads succeeded: remove what is no longer wanted.
+    // Downloads succeeded: remove what is no longer wanted. On a
+    // case-insensitive filesystem an unwanted `node_modules/FOO` can be the
+    // same folder as a wanted `node_modules/foo` that was just placed; that
+    // one stays.
+    let wanted_by_case: HashMap<String, Vec<&str>> = plan.install.iter().fold(HashMap::new(), |mut m, &i| {
+        let loc = lock.entries[i].path.as_str();
+        m.entry(loc.to_lowercase()).or_insert_with(Vec::new).push(loc);
+        m
+    });
     for (loc, loc_bins) in &gone {
         let path = dir.join(loc);
-        if fs::symlink_metadata(&path).is_err() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let same_folder = wanted_by_case.get(&loc.to_lowercase()).is_some_and(|locs| {
+            locs.iter().any(|w| {
+                fs::symlink_metadata(dir.join(w)).is_ok_and(|m| (m.dev(), m.ino()) == (meta.dev(), meta.ino()))
+            })
+        });
+        if same_folder {
             continue;
         }
         remove_path(&path).map_err(|e| format!("removing {}: {e}", path.display()))?;
