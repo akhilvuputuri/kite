@@ -466,6 +466,13 @@ impl Tree {
             for (_, kid) in self.nodes[old].children.clone() {
                 self.set_parent(kid, new);
             }
+            // Replacing a link takes its target out of the tree too
+            // (Node.replace: `node.target.root = null`).
+            if self.nodes[old].is_link
+                && let Some(target) = self.nodes[old].target
+            {
+                self.detach(target);
+            }
         }
         self.nodes[new].name = self.nodes[old].name.clone();
         match (parent, fs_parent) {

@@ -7,6 +7,8 @@
 #
 # CMD selects the command (install, uninstall, update; default install).
 # PREPARE is a shell snippet run in each copy before the command.
+# KITE_EXPECT is a grep -E pattern Kite's summary line must match
+# (for example ", 1 placed, 0 removed").
 set -euo pipefail
 fixture=$(cd "$1" && pwd)
 kite=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
@@ -33,7 +35,12 @@ for tool in npm kite; do
   if [ "$tool" = npm ]; then
     (cd "$dest" && eval "${PREPARE:-true}" && npm "${CMD:-install}" --no-audit --no-fund --loglevel=error "$@" >/dev/null)
   else
-    (cd "$dest" && eval "${PREPARE:-true}" && "$kite" "${CMD:-install}" --quiet "$@")
+    (cd "$dest" && eval "${PREPARE:-true}" && "$kite" "${CMD:-install}" "$@" 2>"$work/$scenario-kite.out")
+    if [ -n "${KITE_EXPECT:-}" ] && ! grep -Eq "$KITE_EXPECT" "$work/$scenario-kite.out"; then
+      echo "install parity: $scenario — kite did not match /$KITE_EXPECT/:"
+      tail -2 "$work/$scenario-kite.out"
+      exit 1
+    fi
   fi
   end=$(node -e 'console.log(Date.now())')
   echo "$tool install: $((end - start)) ms" >&2

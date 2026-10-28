@@ -224,11 +224,37 @@ pub enum Mode {
     /// `npm install`: diff the installed tree against the lockfile and only
     /// add, change or remove what differs. `root_scripts` runs the root's
     /// install lifecycle, as `npm install` with no package arguments does.
-    Incremental { root_scripts: bool },
+    Incremental { root_scripts: bool, command: &'static str },
 }
 
 pub fn ci(opts: &CiOptions) -> Result<(), String> {
-    reify(opts, Mode::Clean)
+    reify(opts, Mode::Clean, None)
+}
+
+static ASIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Removes nested folders an interrupted install set aside
+/// (`.<name>.kite-nested-*` next to a package).
+fn sweep_aside_leftovers(dir: &Path, local_roots: &[String]) {
+    let mut folders: Vec<PathBuf> = vec![dir.join("node_modules")];
+    folders.extend(local_roots.iter().map(|r| dir.join(r).join("node_modules")));
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            if name.starts_with('.') && name.contains(".kite-nested-") {
+                let _ = fs::remove_dir_all(entry.path());
+            } else if name.starts_with('@') {
+                folders.push(entry.path());
+            } else if !name.starts_with('.') {
+                folders.push(entry.path().join("node_modules"));
+            }
+        }
+    }
 }
 
 /// What is installed at a location, from the hidden lockfile or the disk.
@@ -245,13 +271,11 @@ struct Actual {
 /// arborist loadActual: the hidden lockfile when nothing in node_modules is
 /// newer than it, otherwise each installed package's package.json (which
 /// carries no integrity, so those packages count as changed).
-fn load_actual(dir: &Path, local_roots: &[String]) -> HashMap<String, Actual> {
+fn load_actual(dir: &Path, local_roots: &[String], previous: Option<&Lockfile>) -> HashMap<String, Actual> {
     let nm = dir.join("node_modules");
     let hidden = nm.join(".package-lock.json");
-    if crate::resolve::hidden_lockfile_current(&nm, &hidden)
+    if crate::resolve::hidden_lockfile_current(dir, &hidden)
         && let Ok(h) = Lockfile::read(&hidden)
-        // Every package it lists must still be on disk.
-        && h.entries.iter().filter(|e| e.in_node_modules()).all(|e| fs::symlink_metadata(dir.join(&e.path)).is_ok())
     {
         return h
             .entries
@@ -278,6 +302,22 @@ fn load_actual(dir: &Path, local_roots: &[String]) -> HashMap<String, Actual> {
     for root in walk_roots {
         scan_node_modules(dir, &root, &mut out);
     }
+    // Shrinkwrap.add: package-lock.json supplies resolved and integrity for
+    // each installed package whose version matches, so only packages that
+    // really differ count as changed.
+    if let Some(prev) = previous {
+        let by_loc: HashMap<&str, &Entry> = prev.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+        for (loc, a) in out.iter_mut() {
+            if let Some(e) = by_loc.get(loc.as_str())
+                && a.link.is_none()
+                && a.version.is_some()
+                && a.version == e.version
+            {
+                a.integrity = e.integrity.clone();
+                a.resolved = e.resolved.clone();
+            }
+        }
+    }
     out
 }
 
@@ -297,6 +337,10 @@ fn scan_node_modules(dir: &Path, owner: &str, out: &mut HashMap<String, Actual>)
             continue;
         }
         if name.starts_with('@') {
+            // A symlinked scope is someone else's folder; never walk into it.
+            if fs::symlink_metadata(e.path()).map(|m| !m.is_dir()).unwrap_or(true) {
+                continue;
+            }
             if let Ok(scoped) = fs::read_dir(e.path()) {
                 for s in scoped.flatten() {
                     names.push(format!("{name}/{}", s.file_name().to_string_lossy()));
@@ -364,7 +408,8 @@ fn unchanged(dir: &Path, e: &Entry, actual: &Actual, bins: &[(String, String)]) 
     let bins_exist = match bins::node_modules_of(&e.path) {
         Some(nm) => bins
             .iter()
-            .all(|(name, _)| fs::symlink_metadata(dir.join(nm).join(".bin").join(name)).is_ok()),
+            // existsSync follows the link: a dangling bin counts as missing.
+            .all(|(name, _)| fs::metadata(dir.join(nm).join(".bin").join(name)).is_ok()),
         None => true,
     };
     if !bins_exist {
@@ -380,7 +425,7 @@ fn unchanged(dir: &Path, e: &Entry, actual: &Actual, bins: &[(String, String)]) 
     }
 }
 
-pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
+pub fn reify(opts: &CiOptions, mode: Mode, previous: Option<&Lockfile>) -> Result<(), String> {
     let started = Instant::now();
     // Configuration errors must surface before node_modules is touched.
     let network_concurrency = network_concurrency()?;
@@ -460,6 +505,11 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
     // The packages to (re)place: everything for ci, only what differs from
     // the installed tree for install.
     let mut removed = 0usize;
+    // Packages to remove after every download succeeded, with their bins.
+    let mut gone: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    // The bins each replaced package had before, removed when it is placed.
+    let mut old_bins: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let in_lockfile: HashSet<&str> = lock.entries.iter().map(|e| e.path.as_str()).collect();
     let changed: HashSet<usize> = match mode {
         Mode::Clean => plan.install.iter().copied().collect(),
         Mode::Incremental { .. } => {
@@ -469,29 +519,29 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
                 .filter(|e| !e.is_root() && !e.in_node_modules() && !e.link)
                 .map(|e| e.path.clone())
                 .collect();
-            let actual = load_actual(dir, &local_roots);
+            sweep_aside_leftovers(dir, &local_roots);
+            let actual = load_actual(dir, &local_roots, previous);
             let wanted: HashSet<&str> = plan.install.iter().map(|&i| lock.entries[i].path.as_str()).collect();
-            // Remove what is installed but no longer wanted, shallowest
-            // first, with its bin links.
-            // Only packages inside a node_modules folder are ever removed;
-            // link targets are the project's own source folders.
-            let mut gone: Vec<&String> = actual
+            // Installed but no longer wanted, shallowest first. Only packages
+            // inside a node_modules folder are ever removed; link targets are
+            // the project's own source folders.
+            let mut unwanted: Vec<&String> = actual
                 .keys()
                 .filter(|loc| in_node_modules(loc) && !wanted.contains(loc.as_str()))
                 .collect();
-            gone.sort_by_key(|loc| depth(loc));
-            for loc in gone {
-                let path = dir.join(loc);
-                if fs::symlink_metadata(&path).is_err() {
-                    continue;
+            unwanted.sort_by_key(|loc| depth(loc));
+            for loc in unwanted {
+                // npm counts these in its diff unless they are only omitted.
+                if !in_lockfile.contains(loc.as_str()) {
+                    removed += 1;
                 }
-                remove_path(&path).map_err(|e| format!("removing {}: {e}", path.display()))?;
-                if let Some(nm) = bins::node_modules_of(loc) {
-                    for (name, _) in &actual[loc].bins {
-                        let _ = fs::remove_file(dir.join(nm).join(".bin").join(name));
-                    }
+                gone.push((loc.clone(), actual[loc].bins.clone()));
+            }
+            for &i in &plan.install {
+                let e = &lock.entries[i];
+                if let Some(a) = actual.get(&e.path) {
+                    old_bins.insert(e.path.clone(), a.bins.clone());
                 }
-                removed += 1;
             }
             plan.install
                 .iter()
@@ -569,47 +619,61 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
         if let Some(parent) = dest.parent() {
             link::mkdirp(parent, umask).map_err(|err| format!("{}: {err}", parent.display()))?;
         }
-        // A replaced package keeps its nested node_modules: unchanged
-        // children stay, as arborist moves retired unchanged nodes back.
+        // A replaced package keeps its nested node_modules (unchanged
+        // children stay, as arborist moves retired unchanged nodes back).
+        // Only a real package folder qualifies: through a symlinked package
+        // the path would reach the link target's own node_modules.
         let nested = dest.join("node_modules");
-        let kept = if !e.link && fs::symlink_metadata(&nested).is_ok_and(|m| m.is_dir()) {
+        let is_real_dir = fs::symlink_metadata(&dest).is_ok_and(|m| m.is_dir());
+        let kept = if !e.link && is_real_dir && fs::symlink_metadata(&nested).is_ok_and(|m| m.is_dir()) {
             let aside = dest.with_file_name(format!(
-                ".{}.kite-nested-{}",
+                ".{}.kite-nested-{}-{}",
                 dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg"),
-                std::process::id()
+                std::process::id(),
+                ASIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             fs::rename(&nested, &aside).map_err(|err| format!("{}: {err}", nested.display()))?;
             Some(aside)
         } else {
             None
         };
-        remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
-        // A replaced package's bin links are recreated (and their targets
-        // made executable again), as arborist does for changed nodes.
-        if let Some(nm) = bins::node_modules_of(&e.path) {
-            for (name, _) in bins_of(e) {
-                let _ = fs::remove_file(dir.join(nm).join(".bin").join(name));
+        let replace = || -> Result<(), String> {
+            remove_path(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+            // The old version's bin links and the new one's are recreated,
+            // so targets are made executable again and dropped bins vanish.
+            if let Some(nm) = bins::node_modules_of(&e.path) {
+                let old = old_bins.get(&e.path).cloned().unwrap_or_default();
+                for (name, _) in bins_of(e).into_iter().chain(old) {
+                    let _ = fs::remove_file(dir.join(nm).join(".bin").join(name));
+                }
             }
-        }
-        let restore = |result: Result<(), String>| -> Result<(), String> {
-            if let Some(aside) = &kept {
-                fs::rename(aside, &nested).map_err(|err| format!("{}: {err}", nested.display()))?;
+            if e.link {
+                let target_abs = dir.join(e.resolved.as_deref().unwrap_or_default());
+                let rel = relative_path(dest.parent().unwrap_or(dir), &target_abs);
+                return std::os::unix::fs::symlink(&rel, &dest).map_err(|err| format!("{}: {err}", dest.display()));
             }
-            result
-        };
-        if e.link {
-            let target_abs = dir.join(e.resolved.as_deref().unwrap_or_default());
-            let rel = relative_path(dest.parent().unwrap_or(dir), &target_abs);
-            std::os::unix::fs::symlink(&rel, &dest).map_err(|err| format!("{}: {err}", dest.display()))?;
-            return Ok(());
-        }
-        let pkg = pkg.expect("registry packages are stored before placing");
-        restore(
+            let pkg = pkg.expect("registry packages are stored before placing");
             link::materialize(&pkg.dir, &pkg.files, &dest, umask, e.has_install_script, &|| {
                 crate::store::mark_linked(&pkg.dir)
             })
-            .map_err(|err| format!("{}: {err}", e.path)),
-        )
+            .map_err(|err| format!("{}: {err}", e.path))
+        };
+        let result = replace();
+        // Put the kept children back whatever happened above.
+        if let Some(aside) = &kept {
+            if !dest.is_dir() {
+                let _ = fs::create_dir_all(&dest);
+            }
+            if let Err(err) = fs::rename(aside, &nested) {
+                return Err(format!(
+                    "{}: could not restore {} ({err}); it is kept at {}",
+                    e.path,
+                    nested.display(),
+                    aside.display()
+                ));
+            }
+        }
+        result
     };
 
     // Download, verify and store each package; a package directly under a
@@ -645,6 +709,20 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
     let downloaded = stored.iter().filter(|(_, p)| p.downloaded).count();
     let stored: HashMap<String, crate::store::StoredPackage> = stored.into_iter().collect();
 
+    // Downloads succeeded: remove what is no longer wanted.
+    for (loc, loc_bins) in &gone {
+        let path = dir.join(loc);
+        if fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        remove_path(&path).map_err(|e| format!("removing {}: {e}", path.display()))?;
+        if let Some(nm) = bins::node_modules_of(loc) {
+            for (name, _) in loc_bins {
+                let _ = fs::remove_file(dir.join(nm).join(".bin").join(name));
+            }
+        }
+    }
+
     // Links and nested packages, shallowest first.
     let mut by_depth: Vec<Vec<usize>> = Vec::new();
     for &i in plan.install.iter().filter(|i| changed.contains(i)) {
@@ -671,7 +749,10 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
     mark("place");
     // Build: rebuild.js runs registry dependencies first, then links.
     let ctx = scripts::Context {
-        command: if mode == Mode::Clean { "ci" } else { "install" },
+        command: match mode {
+            Mode::Clean => "ci",
+            Mode::Incremental { command, .. } => command,
+        },
         node_env_production: opts.omit.dev,
     };
     let mut deps: Vec<usize> = plan
@@ -680,7 +761,20 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
         .copied()
         .filter(|&i| !lock.entries[i].link && changed.contains(&i))
         .collect();
-    let mut links: Vec<usize> = plan.install.iter().copied().filter(|&i| lock.entries[i].link).collect();
+    // rebuild.js: every link for ci; for install, changed links and the
+    // unchanged ones linked from the project root.
+    let mut links: Vec<usize> = plan
+        .install
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let e = &lock.entries[i];
+            e.link
+                && (mode == Mode::Clean
+                    || changed.contains(&i)
+                    || depth(&e.path) == 1 && e.path.starts_with("node_modules/"))
+        })
+        .collect();
     sort_nodes(&lock, &mut deps);
     sort_nodes(&lock, &mut links);
 
@@ -788,7 +882,7 @@ pub fn reify(opts: &CiOptions, mode: Mode) -> Result<(), String> {
 
     mark("hidden-lock");
     let any_change = !changed.is_empty() || removed > 0;
-    let root_lifecycle = matches!(mode, Mode::Clean | Mode::Incremental { root_scripts: true });
+    let root_lifecycle = matches!(mode, Mode::Clean | Mode::Incremental { root_scripts: true, .. });
     if !opts.ignore_scripts {
         if any_change {
             scripts::run_root(
