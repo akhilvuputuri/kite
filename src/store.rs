@@ -238,9 +238,17 @@ impl Store {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::rename(dir, &aside)?;
-        let _ = fs::remove_dir_all(&aside);
-        Ok(())
+        match fs::rename(dir, &aside) {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(&aside);
+                Ok(())
+            }
+            // overlayfs without redirect_dir (Docker's containerd snapshotter)
+            // cannot rename a folder that came from a lower image layer, so
+            // the entry is removed where it is.
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => fs::remove_dir_all(dir),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -291,10 +299,17 @@ fn verify(package: &Path, files: &[IndexedFile]) -> bool {
                 m.is_file()
                     && m.mode() & 0o7777 == f.file.mode
                     && m.len() == f.size
-                    && (m.mtime(), m.mtime_nsec()) == f.mtime
+                    && mtime_matches((m.mtime(), m.mtime_nsec()), f.mtime)
             }
             Err(_) => false,
         })
+}
+
+/// Docker image layers may keep modification times only to the second, so a
+/// store carried into the next build step has its nanoseconds zeroed. An edit
+/// through a node_modules hard link sets a new time, which still differs.
+fn mtime_matches(disk: (i64, i64), indexed: (i64, i64)) -> bool {
+    disk == indexed || (disk.1 == 0 && disk.0 == indexed.0)
 }
 
 fn read_index(path: &Path) -> Option<Vec<IndexedFile>> {
@@ -316,4 +331,60 @@ fn read_index(path: &Path) -> Option<Vec<IndexedFile>> {
         });
     }
     Some(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn verify_accepts_times_kept_to_the_second() {
+        let dir = std::env::temp_dir().join(format!("kite-verify-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.js");
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let entry = |secs: i64, nanos: i64| IndexedFile {
+            file: ExtractedFile {
+                path: "a.js".to_string(),
+                mode: 0o644,
+            },
+            size: 1,
+            mtime: (secs, nanos),
+        };
+        // The layer kept whole seconds only.
+        let whole = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(whole)
+            .unwrap();
+        assert!(verify(&dir, &[entry(1_700_000_000, 123_456_789)]));
+        assert!(verify(&dir, &[entry(1_700_000_000, 0)]));
+        // A different second, or a size change, is still a change.
+        assert!(!verify(&dir, &[entry(1_700_000_001, 123_456_789)]));
+        fs::write(&file, "xy").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(whole)
+            .unwrap();
+        assert!(!verify(&dir, &[entry(1_700_000_000, 123_456_789)]));
+        // Nanoseconds on disk must match exactly.
+        fs::write(&file, "x").unwrap();
+        let precise = whole + Duration::from_nanos(5);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(precise)
+            .unwrap();
+        assert!(!verify(&dir, &[entry(1_700_000_000, 123_456_789)]));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

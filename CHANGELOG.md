@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.3
+
+- Multi-step Docker builds work on Docker's containerd image store (the default for a fresh
+  Docker 29 install). `kite ci` in one build step followed by `kite ci --omit=dev` in the next
+  failed there: image layers keep file times only to the second, so Kite treated its store as
+  modified and then could not rename the store folder, because overlayfs without `redirect_dir`
+  refuses to rename a folder from a lower layer. Kite now accepts times kept to the second, and
+  removes a store entry in place when it cannot be renamed.
+- The later step reuses the store instead of downloading every package again.
+- New CI check: a two-step image build on the containerd image store with the legacy builder.
+
 ## 0.1.2
 
 - `kite install`, `uninstall` and `update` now work like `npm install`: they compare the installed
