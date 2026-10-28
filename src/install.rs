@@ -1,4 +1,4 @@
-//! `lockstep ci`: install exactly what `package-lock.json` describes.
+//! `kite ci`: install exactly what `package-lock.json` describes.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -207,14 +207,11 @@ fn link_target<'a>(lock: &'a Lockfile, e: &Entry) -> Option<&'a Entry> {
 
 pub fn ci(opts: &CiOptions) -> Result<(), String> {
     let started = Instant::now();
-    let timing = std::env::var_os("LOCKSTEP_TIMING").is_some();
+    let timing = std::env::var_os("KITE_TIMING").is_some();
     let mut last = Instant::now();
     let mut mark = |label: &str| {
         if timing {
-            eprintln!(
-                "lockstep: {label:<14} {:>7.1} ms",
-                last.elapsed().as_secs_f64() * 1000.0
-            );
+            eprintln!("kite: {label:<14} {:>7.1} ms", last.elapsed().as_secs_f64() * 1000.0);
             last = Instant::now();
         }
     };
@@ -351,8 +348,8 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
         locations.entry(integrity.store_key()).or_default().push(i);
     }
     // Downloads wait on the network, not the CPU: keep many in flight
-    // regardless of core count (LOCKSTEP_NETWORK_CONCURRENCY overrides).
-    let fetch_jobs = std::env::var("LOCKSTEP_NETWORK_CONCURRENCY")
+    // regardless of core count (KITE_NETWORK_CONCURRENCY overrides).
+    let fetch_jobs = std::env::var("KITE_NETWORK_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -370,7 +367,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
     if timing {
         use std::sync::atomic::Ordering::Relaxed;
         eprintln!(
-            "lockstep:   (thread time: download+unpack {} ms, {} MB, {} store entries replaced)",
+            "kite:   (thread time: download+unpack {} ms, {} MB, {} store entries replaced)",
             crate::store::DOWNLOAD_US.load(Relaxed) / 1000,
             crate::store::BYTES.load(Relaxed) / 1_000_000,
             crate::store::TAMPERED.load(Relaxed)
@@ -562,7 +559,7 @@ pub fn ci(opts: &CiOptions) -> Result<(), String> {
 
     if !opts.quiet {
         eprintln!(
-            "lockstep: installed {} packages ({} downloaded) in {:.2}s",
+            "kite: installed {} packages ({} downloaded) in {:.2}s",
             plan.install.len(),
             downloaded,
             started.elapsed().as_secs_f64()

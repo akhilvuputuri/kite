@@ -1,6 +1,6 @@
 name: bench
 # Informational: cold and warm installs of Chief's lockfile against Bun on
-# GitHub's runners, sweeping lockstep's download concurrency. Never gates.
+# GitHub's runners, sweeping kite's download concurrency. Never gates.
 on:
   pull_request:
     branches: [main]
@@ -32,7 +32,7 @@ jobs:
             BENCH_TOOLS=bun harness/bench.sh tests/fixtures/chief "$BIN" 5
             for n in 16 32 48 64 96; do
               echo
-              echo "lockstep, LOCKSTEP_NETWORK_CONCURRENCY=$n:"
-              LOCKSTEP_NETWORK_CONCURRENCY=$n BENCH_TOOLS=lockstep harness/bench.sh tests/fixtures/chief "$BIN" 5
+              echo "kite, KITE_NETWORK_CONCURRENCY=$n:"
+              KITE_NETWORK_CONCURRENCY=$n BENCH_TOOLS=kite harness/bench.sh tests/fixtures/chief "$BIN" 5
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"

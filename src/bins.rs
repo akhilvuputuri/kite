@@ -195,7 +195,7 @@ pub fn fix_bin(path: &Path, umask: u32) -> io::Result<()> {
     }
     let fixed = format!("{}\n{}", &text[..line_end - 1], &text[line_end + 1..]);
     let tmp = real.with_file_name(format!(
-        ".{}.lockstep-tmp",
+        ".{}.kite-tmp",
         real.file_name().and_then(|n| n.to_str()).unwrap_or("bin")
     ));
     fs::write(&tmp, fixed)?;

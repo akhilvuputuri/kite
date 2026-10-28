@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use crate::fetch;
 use crate::semver::{Range, Version};
 
-/// npm's resolution also checks `engines.npm`; lockstep mirrors npm 10.9.9.
+/// npm's resolution also checks `engines.npm`; kite mirrors npm 10.9.9.
 pub const NPM_VERSION: &str = "10.9.9";
 
 type Slot = Result<Arc<Value>, String>;

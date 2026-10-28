@@ -40,9 +40,9 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: ubuntu-24.04, asset: lockstep-linux-x64 }
-          - { os: ubuntu-24.04-arm, asset: lockstep-linux-arm64 }
-          - { os: macos-15, asset: lockstep-darwin-arm64 }
+          - { os: ubuntu-24.04, asset: kite-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: kite-linux-arm64 }
+          - { os: macos-15, asset: kite-darwin-arm64 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check the tag matches Cargo.toml
@@ -78,12 +78,12 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: ubuntu-24.04, asset: lockstep-linux-x64 }
-          - { os: ubuntu-24.04-arm, asset: lockstep-linux-arm64 }
-          - { os: macos-15, asset: lockstep-darwin-arm64 }
+          - { os: ubuntu-24.04, asset: kite-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: kite-linux-arm64 }
+          - { os: macos-15, asset: kite-darwin-arm64 }
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
-      LOCKSTEP_STORE: ${{ github.workspace }}/../lockstep-store
+      KITE_STORE: ${{ github.workspace }}/../kite-store
       PARITY_WORK: ${{ github.workspace }}/../parity
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -134,14 +134,14 @@ jobs:
       - name: Collect the binaries
         run: |
           mkdir dist
-          cp artifacts/lockstep-*/lockstep-* dist/
+          cp artifacts/kite-*/kite-* dist/
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
-            dist/lockstep-linux-x64
-            dist/lockstep-linux-arm64
-            dist/lockstep-darwin-arm64
+            dist/kite-linux-x64
+            dist/kite-linux-arm64
+            dist/kite-darwin-arm64
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -160,4 +160,4 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* --title "lockstep $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          gh release create "$GITHUB_REF_NAME" dist/* --title "kite $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

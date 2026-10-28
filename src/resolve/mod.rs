@@ -1,4 +1,4 @@
-//! `lockstep install`, `uninstall` and `update`: resolve package.json into
+//! `kite install`, `uninstall` and `update`: resolve package.json into
 //! a package-lock.json the way npm 10.9 does, then install it.
 
 mod build;
@@ -122,7 +122,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     };
     for unsupported in ["overrides", "workspaces", "bundleDependencies", "bundledDependencies"] {
         if raw_pkg.contains_key(unsupported) {
-            return Err(format!("package.json \"{unsupported}\" is not supported by lockstep"));
+            return Err(format!("package.json \"{unsupported}\" is not supported by kite"));
         }
     }
     if dir.join("npm-shrinkwrap.json").exists() {
@@ -134,7 +134,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     } else {
         // Without a lockfile npm starts from what is installed (loadActual).
         // node_modules/.package-lock.json records exactly that; without it
-        // lockstep refuses rather than resolve differently.
+        // kite refuses rather than resolve differently.
         let hidden = dir.join("node_modules/.package-lock.json");
         if hidden.exists() {
             // Arborist trusts the hidden lockfile only when nothing in
@@ -152,7 +152,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
             .unwrap_or(false)
         {
             return Err(
-                "there is no package-lock.json, and node_modules was not installed by npm or lockstep; \
+                "there is no package-lock.json, and node_modules was not installed by npm or kite; \
                         remove node_modules or restore package-lock.json"
                     .into(),
             );
@@ -208,7 +208,7 @@ pub fn run(opts: ResolveOptions) -> Result<(), String> {
     if !opts.ci.quiet {
         let count = b.t.inventory().len().saturating_sub(1);
         eprintln!(
-            "lockstep: {} package-lock.json ({count} entries)",
+            "kite: {} package-lock.json ({count} entries)",
             if changed { "wrote" } else { "kept" }
         );
     }
@@ -286,8 +286,8 @@ pub fn ci_ideal_flags(
     }
     if !errors.is_empty() {
         return Err(format!(
-            "`lockstep ci` can only install packages when package.json and package-lock.json are in sync. \
-             Update the lock file with `lockstep install` before continuing.\n\n{}",
+            "`kite ci` can only install packages when package.json and package-lock.json are in sync. \
+             Update the lock file with `kite install` before continuing.\n\n{}",
             errors.join("\n")
         ));
     }

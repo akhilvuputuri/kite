@@ -555,7 +555,7 @@ impl Tree {
         self.dep_valid(node, &edge.name, &edge.spec, edge.from)
     }
 
-    /// arborist dep-valid.js for the spec types lockstep supports.
+    /// arborist dep-valid.js for the spec types kite supports.
     pub fn dep_valid(&self, node: Id, name: &str, spec: &str, from: Id) -> bool {
         let Ok(parsed) = npa::parse(name, spec) else {
             return false;

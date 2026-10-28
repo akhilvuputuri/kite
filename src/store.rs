@@ -40,19 +40,23 @@ impl Store {
     }
 
     pub fn default_root() -> PathBuf {
-        if let Some(dir) = std::env::var_os("LOCKSTEP_STORE").filter(|v| !v.is_empty()) {
+        // LOCKSTEP_STORE is the 0.1.0 name, still honoured for one release.
+        if let Some(dir) = std::env::var_os("KITE_STORE")
+            .or_else(|| std::env::var_os("LOCKSTEP_STORE"))
+            .filter(|v| !v.is_empty())
+        {
             return PathBuf::from(dir);
         }
         if let Some(dir) = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
-            return PathBuf::from(dir).join("lockstep");
+            return PathBuf::from(dir).join("kite");
         }
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         if cfg!(target_os = "macos") {
-            home.join("Library/Caches/lockstep")
+            home.join("Library/Caches/kite")
         } else {
-            home.join(".cache/lockstep")
+            home.join(".cache/kite")
         }
     }
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Times cold and warm clean installs of a fixture with npm ci, lockstep ci,
+# Times cold and warm clean installs of a fixture with npm ci, kite ci,
 # pnpm (after `pnpm import` of the same lockfile) and Bun (which converts
 # package-lock.json itself). Prints a Markdown table.
 #
-#   harness/bench.sh <fixture-dir> <lockstep-binary> [runs]
+#   harness/bench.sh <fixture-dir> <kite-binary> [runs]
 #
-# BENCH_TOOLS limits the tools measured (default: npm lockstep pnpm bun).
+# BENCH_TOOLS limits the tools measured (default: npm kite pnpm bun).
 set -euo pipefail
 fixture=$(cd "$1" && pwd)
-lockstep=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+kite=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 runs=${3:-3}
 work=$(mktemp -d)
 now() { node -e 'console.log(Date.now())'; }
@@ -24,7 +24,7 @@ time_install() {
     [ "$mode" = cold ] && rm -rf "$cache"
     case $tool in
       npm) cmd=(npm ci --ignore-scripts --no-audit --no-fund --loglevel=error --cache "$cache") ;;
-      lockstep) cmd=("$lockstep" ci --ignore-scripts --quiet --store "$cache") ;;
+      kite) cmd=("$kite" ci --ignore-scripts --quiet --store "$cache") ;;
       pnpm)
         (cd "$dir" && pnpm import >/dev/null 2>&1 && rm -f package-lock.json)
         cmd=(pnpm install --frozen-lockfile --ignore-scripts --store-dir "$cache" --reporter=silent) ;;
@@ -46,8 +46,8 @@ time_install() {
 
 echo "| tool | cold (ms) | warm (ms) |"
 echo "| --- | ---: | ---: |"
-for tool in ${BENCH_TOOLS:-npm lockstep pnpm bun}; do
-  if [ "$tool" != npm ] && [ "$tool" != lockstep ] && ! command -v "$tool" >/dev/null; then
+for tool in ${BENCH_TOOLS:-npm kite pnpm bun}; do
+  if [ "$tool" != npm ] && [ "$tool" != kite ] && ! command -v "$tool" >/dev/null; then
     continue
   fi
   cold=$(time_install "$tool" cold)

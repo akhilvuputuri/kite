@@ -1,4 +1,4 @@
-//! `lockstep run`, `lockstep test`, `lockstep exec`: package scripts and
+//! `kite run`, `kite test`, `kite exec`: package scripts and
 //! local binaries, following @npmcli/run-script and libnpmexec.
 
 use std::collections::HashMap;
@@ -144,7 +144,7 @@ pub fn script_env(project: &Path, pkg: &Map<String, Value>, event: &str, script:
     vars.push((
         "npm_config_user_agent".into(),
         format!(
-            "lockstep/{} {} {}",
+            "kite/{} {} {}",
             env!("CARGO_PKG_VERSION"),
             crate::platform::Platform::current().os,
             crate::platform::Platform::current().cpu
@@ -242,7 +242,7 @@ pub fn run_script(opts: &RunOptions) -> Result<u8, String> {
         None => {
             if !opts.silent {
                 eprintln!(
-                    "lockstep: Missing script: {event:?} in {}",
+                    "kite: Missing script: {event:?} in {}",
                     opts.root.join("package.json").display()
                 );
             }
@@ -319,13 +319,13 @@ fn list_scripts(pkg: &Map<String, Value>) {
     };
     let name = pkg.get("name").and_then(Value::as_str).unwrap_or("");
     let version = pkg.get("version").and_then(Value::as_str).unwrap_or("");
-    println!("Scripts available in {name}@{version} via `lockstep run`:");
+    println!("Scripts available in {name}@{version} via `kite run`:");
     for (k, v) in scripts {
         println!("  {k}\n    {}", v.as_str().unwrap_or(""));
     }
 }
 
-/// `lockstep exec <bin> [args]`: runs a binary from the nearest
+/// `kite exec <bin> [args]`: runs a binary from the nearest
 /// `node_modules/.bin`, walking up from the package root. Never downloads.
 /// The binary is executed directly (no shell), so arguments reach it
 /// verbatim.
@@ -346,7 +346,7 @@ pub fn exec_bin(cwd: &Path, bin: &str, args: &[String]) -> Result<u8, String> {
     }
     let Some(path) = found else {
         return Err(format!(
-            "{bin:?} is not installed in node_modules/.bin (searched from {}); lockstep exec never downloads packages",
+            "{bin:?} is not installed in node_modules/.bin (searched from {}); kite exec never downloads packages",
             root.display()
         ));
     };

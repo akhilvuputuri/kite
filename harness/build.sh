@@ -14,7 +14,7 @@ if [ "$(uname -s)" = Linux ] && ! command -v musl-gcc >/dev/null; then
   sudo apt-get update -qq >&2 && sudo apt-get install -y -qq musl-tools >&2
 fi
 rustup target add "$target" >&2
-export RUSTFLAGS="--remap-path-prefix=$PWD=/lockstep --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+export RUSTFLAGS="--remap-path-prefix=$PWD=/kite --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 export SOURCE_DATE_EPOCH=0
 cargo build --locked --release --target "$target" >&2
-echo "$PWD/target/$target/release/lockstep"
+echo "$PWD/target/$target/release/kite"

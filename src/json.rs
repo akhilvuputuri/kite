@@ -56,7 +56,7 @@ pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
     let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let path = real.as_path();
     let tmp = path.with_file_name(format!(
-        ".{}.lockstep-{}",
+        ".{}.kite-{}",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         std::process::id()
     ));
