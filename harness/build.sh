@@ -11,7 +11,13 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported build host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 if [ "$(uname -s)" = Linux ] && ! command -v musl-gcc >/dev/null; then
-  sudo apt-get update -qq >&2 && sudo apt-get install -y -qq musl-tools >&2
+  # The package mirror is sometimes unreachable for a minute or two.
+  for attempt in 1 2 3 4; do
+    if sudo apt-get update -qq >&2 && sudo apt-get install -y -qq musl-tools >&2; then break; fi
+    echo "apt attempt $attempt failed" >&2
+    sleep $((attempt * 20))
+  done
+  command -v musl-gcc >/dev/null || { echo "musl-tools could not be installed" >&2; exit 1; }
 fi
 rustup target add "$target" >&2
 export RUSTFLAGS="--remap-path-prefix=$PWD=/kite --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
