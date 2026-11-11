@@ -4,18 +4,25 @@
 
 - New command `kite build`: compiles a TypeScript project to JavaScript from its
   `tsconfig.json`, without type checking. The output has the same syntax tree as `tsc`'s;
-  layout and comments differ. On one 232-file project it takes 23 ms against 3.5 s for
+  layout and comments differ. On one 232-file project it takes 27 ms against 1.7 s for
   `tsc --noCheck`.
-- It reads `extends`, `files`, `include`, `exclude`, `rootDir`, `outDir`, `target`, `module`,
-  `verbatimModuleSyntax`, `isolatedModules`, `removeComments`, `sourceMap`, `inlineSourceMap`
-  and `inlineSources`. An unchanged build rewrites no files.
+- Like `tsc`, it compiles the project files the selected files import, ends a module with
+  nothing left to import or export with `export {}`, and opens a script with
+  `"use strict"` under `strict`. An unchanged build rewrites no files, and a refused build
+  writes nothing.
+- It reads `extends`, `files`, `include`, `exclude`, `${configDir}`, `rootDir`, `outDir`,
+  `target`, `module`, `moduleDetection`, `strict`, `alwaysStrict`, `verbatimModuleSyntax`,
+  `isolatedModules`, `removeComments`, `baseUrl`, `paths`, `sourceMap`, `inlineSourceMap`
+  and `inlineSources`.
 - It refuses what it cannot show matches `tsc`, naming the file and line: enums, namespaces,
-  decorators, JSX, `import =`, `export =`, JSON imports, CommonJS output, `using` and
-  `accessor` below target ESNext, and targets below ES2022. Declaration files still need
-  `tsc`; `--skip-declarations` builds the JavaScript alone.
+  decorators, JSX, `import =`, `export =`, JSON imports, exports of `declare`d names,
+  CommonJS output, `using` and `accessor` below target ESNext, and targets below ES2022.
+  Declaration files still need `tsc`; `--skip-declarations` builds the JavaScript alone.
+- Not followed: an import by package name that leads to a workspace package's sources,
+  unless `paths` or `baseUrl` maps it.
 - New CI check: fixture projects are compiled with `tsc` 5.9.3 and with `kite build` and
   compared by syntax tree.
-- The binary grows from about 2.4 MB to about 5.6 MB (macOS arm64), for the TypeScript
+- The binary grows from about 2.4 MB to about 5.7 MB (macOS arm64), for the TypeScript
   parser and printer.
 
 ## 0.1.3

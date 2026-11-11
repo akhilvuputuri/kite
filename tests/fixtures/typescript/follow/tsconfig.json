@@ -1,0 +1,18 @@
+{
+  // Only the entry point is listed: tsc compiles what it imports as well. rootDir is left
+  // for tsc to work out, and every file is a module whatever it contains.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "inlineSourceMap": true,
+    "inlineSources": true,
+    "outDir": "${configDir}/dist",
+    "paths": { "@lib/*": ["./lib/*"] }
+  },
+  "files": ["src/index.ts"],
+  "exclude": ["src/excluded.ts"]
+}

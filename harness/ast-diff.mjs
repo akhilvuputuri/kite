@@ -27,11 +27,15 @@ function simplify(node, parent) {
     else return node;
   }
 }
+// Where a lone `;` is a statement of its own and means nothing. Elsewhere it is the body
+// of an `if` or a loop, and dropping it would change the program.
+const LISTS = new Set([K.SourceFile, K.Block, K.ModuleBlock, K.CaseClause, K.DefaultClause, K.ClassStaticBlockDeclaration]);
 function children(node) {
   const out = [];
   ts.forEachChild(node, (child) => { out.push(child); });
   return out.filter((child) => {
-    if (child.kind === K.EmptyStatement) return false;
+    if (child.kind === K.EmptyStatement && LISTS.has(node.kind)) return false;
+    if (child.kind === K.SemicolonClassElement) return false;
     // `import {} from "x"` and `import d, {} from "x"` bind nothing through the braces.
     if (child.kind === K.NamedImports && child.elements.length === 0) return false;
     if (child.kind === K.ImportClause && !child.name && (!child.namedBindings || (child.namedBindings.kind === K.NamedImports && child.namedBindings.elements.length === 0))) return false;
@@ -42,9 +46,13 @@ function leaf(node) {
   switch (node.kind) {
     case K.Identifier: case K.PrivateIdentifier: return node.text;
     case K.StringLiteral: return node.text;
-    case K.NoSubstitutionTemplateLiteral: case K.TemplateHead: case K.TemplateMiddle: case K.TemplateTail: return JSON.stringify([node.text, node.rawText]);
+    // A template's line endings are always read as LF, however the file stores them.
+    case K.NoSubstitutionTemplateLiteral: case K.TemplateHead: case K.TemplateMiddle: case K.TemplateTail: return JSON.stringify([node.text, node.rawText]).replaceAll("\\r\\n", "\\n");
     case K.NumericLiteral: return String(Number(node.text));
-    case K.BigIntLiteral: case K.RegularExpressionLiteral: return node.text;
+    case K.BigIntLiteral: return String(BigInt(node.text.replace(/n$/, "").replaceAll("_", "")));
+    case K.RegularExpressionLiteral: return node.text;
+    // `import defer` is a field of the clause, not a child.
+    case K.ImportClause: return node.phaseModifier ? K[node.phaseModifier] : undefined;
     // Operators and keywords these nodes hold as fields, not as child tokens.
     case K.PrefixUnaryExpression: case K.PostfixUnaryExpression: return K[node.operator];
     case K.HeritageClause: return K[node.token];
@@ -52,8 +60,11 @@ function leaf(node) {
     default: return undefined;
   }
 }
-const kindOf = (node) => (node.kind === K.ShorthandPropertyAssignment ? K.PropertyAssignment : node.kind);
-const parts = (node) => (node.kind === K.ShorthandPropertyAssignment ? [node.name, node.name] : children(node));
+// `{ a }` is `{ a: a }`. `{ a = 1 }` in a destructuring target has no such long form
+// here, so it is compared as written, default included.
+const isPlainShorthand = (node) => node.kind === K.ShorthandPropertyAssignment && !node.objectAssignmentInitializer;
+const kindOf = (node) => (isPlainShorthand(node) ? K.PropertyAssignment : node.kind);
+const parts = (node) => (isPlainShorthand(node) ? [node.name, node.name] : children(node));
 const show = (node, file) => `${K[node.kind]} «${node.getText(file).slice(0, 90).replace(/\s+/g, " ")}»`;
 
 function diff(x, y, fx, fy, px, py) {
@@ -80,6 +91,9 @@ for (const file of [...files].sort()) {
   if (!existsSync(join(first, file)) || !existsSync(join(second, file))) { differences.push([file, "present in only one tree"]); continue; }
   const fx = parse(join(first, file)), fy = parse(join(second, file));
   if (fx.parseDiagnostics.length || fy.parseDiagnostics.length) { differences.push([file, "does not parse"]); continue; }
+  // A hashbang is not in the tree.
+  const hashbang = (source) => (source.text.startsWith("#!") ? source.text.split("\n", 1)[0].trimEnd() : "");
+  if (hashbang(fx) !== hashbang(fy)) { differences.push([file, `hashbang: ${hashbang(fx)}  vs  ${hashbang(fy)}`]); continue; }
   const found = diff(fx, fy, fx, fy);
   if (found) differences.push([file, found]); else same++;
 }

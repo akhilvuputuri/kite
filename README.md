@@ -108,7 +108,9 @@ Linux arm64 and macOS:
 - **TypeScript builds.** `harness/build-parity.sh` compiles fixture projects with `tsc`
   and with `kite build`, then compares the JavaScript by syntax tree and the source maps by
   the files they name. The fixtures cover classes, parameter properties, type-only
-  imports and exports, import elision, `extends` and both module settings.
+  imports and exports, import elision, scripts and forced modules, files reached only
+  through imports, `extends`, `paths` and both module settings. The script first checks
+  that the comparison itself tells equal code from different code.
 
 kite follows npm down to its quirks: arborist's placement and peer-set rules, the
 order-dependent dev/optional flag calculation, pacote's file modes and `.gitignore` renaming,
@@ -127,8 +129,9 @@ kite build --project packages/api       # another project, or a tsconfig file
 kite build --project lib --skip-declarations
 ```
 
-On one 232-file, 124,000-line project it takes 23 ms against 3.5 s for
-`tsc --noCheck` (Apple M4, medians of 9 and 5 runs). An unchanged build rewrites no files.
+On one 232-file, 124,000-line project it takes 27 ms against 1.7 s for
+`tsc --noCheck` (Apple M4, medians of 11 and 5 runs). An unchanged build rewrites no
+files, and a build that is refused writes nothing.
 
 - **What "the same" means.** Layout and comments differ; the code does not. CI compiles
   fixture projects with `tsc` 5.9.3 and with `kite build` and compares each pair of files
@@ -136,16 +139,25 @@ On one 232-file, 124,000-line project it takes 23 ms against 3.5 s for
   `import {} from "x"` and `import "x"`, `{ a: a }` and `{ a }`, and a single statement
   with or without braces around it.
 - **What it compiles.** Syntax that erases to the JavaScript underneath, plus constructor
-  parameter properties, for `target` ES2022 or later and ES module output. It follows
-  `extends`, `files`, `include` and `exclude`, drops imports only used as types unless
-  `verbatimModuleSyntax` is on, and writes source maps for `sourceMap` and
-  `inlineSourceMap`.
+  parameter properties, for `target` ES2022 or later and ES module output. Like `tsc`, it
+  also compiles the project files that the selected files import, drops imports only
+  used as types unless `verbatimModuleSyntax` is on, ends a module that has nothing left
+  to import or export with `export {}`, and opens a script with `"use strict"` under
+  `strict`.
+- **What it reads.** `extends` (paths, packages and lists), `files`, `include`, `exclude`,
+  `${configDir}`, `rootDir` (worked out from the sources when unset), `outDir`, `target`,
+  `module`, `moduleDetection`, `strict`, `alwaysStrict`, `verbatimModuleSyntax`,
+  `isolatedModules`, `removeComments`, `baseUrl`, `paths`, `sourceMap`, `inlineSourceMap`
+  and `inlineSources`.
 - **What it refuses.** Anything `tsc` would turn into different JavaScript, with the file
   and line: enums, namespaces, decorators, JSX, `import =` and `export =`, JSON imports,
-  CommonJS output, and `using` or `accessor` below `target` ESNext. A project must set
-  `rootDir` and `outDir`, and `isolatedModules` or `verbatimModuleSyntax`, so that every
-  file compiles on its own. Declaration files need `tsc`; `--skip-declarations` says the
-  JavaScript alone is wanted.
+  exports of `declare`d names, CommonJS output, and `using` or `accessor` below `target`
+  ESNext. A project must set `outDir`, and `isolatedModules` or `verbatimModuleSyntax`,
+  so that every file compiles on its own. Declaration files need `tsc`;
+  `--skip-declarations` says the JavaScript alone is wanted.
+- **Known gaps.** An import by package name is followed only through `paths` and
+  `baseUrl`, so a workspace package whose sources `tsc` would compile along with this
+  project is not. Source maps name the same files as `tsc`'s; their mappings are coarser.
 
 ## Commands
 

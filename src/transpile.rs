@@ -11,14 +11,15 @@ use std::path::Path;
 use base64::Engine as _;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    AccessorProperty, Decorator, ExportAllDeclaration, ExportFromDeclaration, Expression, ImportDeclaration,
-    ImportExpression, TSEnumDeclaration, TSExportAssignment, TSImportEqualsDeclaration, TSNamespaceDeclaration,
-    VariableDeclaration, VariableDeclarationKind,
+    AccessorProperty, Decorator, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportFromDeclaration, Expression,
+    ImportDeclaration, ImportExpression, ImportMeta, ModuleExportName, Program, Statement, TSEnumDeclaration,
+    TSExportAssignment, TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration, TSImportType,
+    TSNamespaceDeclaration, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc::parser::Parser;
-use oxc::semantic::SemanticBuilder;
+use oxc::semantic::{Scoping, SemanticBuilder, SymbolFlags};
 use oxc::span::{GetSpan, SourceType, Span};
 use oxc::transformer::{TransformOptions, Transformer};
 use serde_json::{Map, Value};
@@ -42,6 +43,12 @@ pub struct Options {
     pub verbatim_module_syntax: bool,
     /// `target` is `ESNext`, so `tsc` leaves `using` and `accessor` as they are.
     pub esnext: bool,
+    /// `alwaysStrict`, which `strict` turns on: a file that is not a module starts with
+    /// `"use strict"`.
+    pub always_strict: bool,
+    /// Every file is a module whatever it contains: `moduleDetection` is `force`, or it
+    /// is `auto` and the file is an ES module by its package and extension.
+    pub force_module: bool,
     /// `removeComments`.
     pub remove_comments: bool,
     pub source_maps: SourceMaps,
@@ -49,12 +56,17 @@ pub struct Options {
     pub inline_sources: bool,
 }
 
-/// One compiled file.
+/// One compiled file, before it knows where it will be written.
 #[derive(Debug)]
 pub struct Output {
-    pub code: String,
-    /// The contents of the `.map` file, for [`SourceMaps::File`].
-    pub map: Option<String>,
+    code: String,
+    /// The `names` and `mappings` of its source map, when one was asked for.
+    map: Option<(Value, String)>,
+    /// Every module this file names: imports, re-exports, `import()` and import types,
+    /// type-only ones included. `tsc` compiles the project files they lead to.
+    pub specifiers: Vec<String>,
+    /// The targets of `/// <reference path="..." />` lines.
+    pub references: Vec<String>,
 }
 
 /// The names a compiled file and its map refer to each other by.
@@ -65,37 +77,98 @@ pub struct Names<'a> {
     pub source: &'a str,
 }
 
-struct Refusals<'s> {
-    source: &'s str,
-    esnext: bool,
-    first: Option<(Span, &'static str)>,
+/// What gets written: the JavaScript, and the `.map` file for [`SourceMaps::File`].
+#[derive(Debug)]
+pub struct Written {
+    pub code: String,
+    pub map: Option<String>,
 }
 
-impl Refusals<'_> {
+impl Output {
+    /// Names the output and its source in the map, and points the code at the map.
+    pub fn finish(self, source_text: &str, options: Options, names: &Names) -> Result<Written, String> {
+        let mut code = self.code;
+        let Some((map_names, mappings)) = self.map else {
+            return Ok(Written { code, map: None });
+        };
+        // tsc's field order.
+        let mut ordered = Map::new();
+        ordered.insert("version".into(), Value::from(3));
+        ordered.insert("file".into(), Value::from(names.file));
+        ordered.insert("sourceRoot".into(), Value::from(""));
+        ordered.insert("sources".into(), Value::from(vec![names.source]));
+        ordered.insert("names".into(), map_names);
+        ordered.insert("mappings".into(), Value::from(mappings));
+        if options.inline_sources {
+            ordered.insert("sourcesContent".into(), Value::from(vec![source_text]));
+        }
+        let json = serde_json::to_string(&Value::Object(ordered)).map_err(|e| format!("{}: {e}", names.file))?;
+        if !code.ends_with('\n') {
+            code.push('\n');
+        }
+        if options.source_maps == SourceMaps::Inline {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+            code.push_str(&format!("//# sourceMappingURL=data:application/json;base64,{encoded}"));
+            return Ok(Written { code, map: None });
+        }
+        code.push_str(&format!("//# sourceMappingURL={}.map", names.file));
+        Ok(Written { code, map: Some(json) })
+    }
+}
+
+struct Scan {
+    esnext: bool,
+    /// Inside `declare namespace`, `declare module` or `declare global`, where nothing is emitted.
+    ambient: u32,
+    refused: Option<(Span, &'static str)>,
+    specifiers: Vec<String>,
+    import_meta: bool,
+}
+
+impl Scan {
     fn refuse(&mut self, span: Span, what: &'static str) {
-        if self.first.is_none_or(|(seen, _)| span.start < seen.start) {
-            self.first = Some((span, what));
+        if self.refused.is_none_or(|(seen, _)| span.start < seen.start) {
+            self.refused = Some((span, what));
         }
     }
 
-    fn json(&mut self, span: Span, specifier: Option<&str>) {
-        if specifier.is_some_and(|s| s.ends_with(".json")) {
+    /// Records a module specifier; a JSON module loaded at run time is refused.
+    fn names(&mut self, span: Span, specifier: Option<&str>, loaded: bool) {
+        let Some(specifier) = specifier else { return };
+        if loaded && specifier.ends_with(".json") {
             self.refuse(span, "a JSON import, which tsc copies into outDir");
         }
+        self.specifiers.push(specifier.to_string());
     }
 }
 
-impl<'a> Visit<'a> for Refusals<'_> {
+impl<'a> Visit<'a> for Scan {
     fn visit_ts_enum_declaration(&mut self, it: &TSEnumDeclaration<'a>) {
-        if !it.declare {
+        if !it.declare && self.ambient == 0 {
             self.refuse(it.span, "an enum");
         }
     }
 
     fn visit_ts_namespace_declaration(&mut self, it: &TSNamespaceDeclaration<'a>) {
-        if !it.declare {
+        if !it.declare && self.ambient == 0 {
             self.refuse(it.span, "a namespace");
+            return;
         }
+        self.ambient += 1;
+        walk::walk_ts_namespace_declaration(self, it);
+        self.ambient -= 1;
+    }
+
+    fn visit_ts_external_module_declaration(&mut self, it: &TSExternalModuleDeclaration<'a>) {
+        self.ambient += 1;
+        walk::walk_ts_external_module_declaration(self, it);
+        self.ambient -= 1;
+    }
+
+    fn visit_ts_global_declaration(&mut self, it: &TSGlobalDeclaration<'a>) {
+        self.ambient += 1;
+        walk::walk_ts_global_declaration(self, it);
+        self.ambient -= 1;
     }
 
     fn visit_decorator(&mut self, it: &Decorator<'a>) {
@@ -129,32 +202,35 @@ impl<'a> Visit<'a> for Refusals<'_> {
         walk::walk_accessor_property(self, it);
     }
 
+    fn visit_import_meta(&mut self, _: &ImportMeta) {
+        self.import_meta = true;
+    }
+
     fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
-        if !it.import_kind.is_type() {
-            self.json(it.span, it.source.value.as_str());
-        }
+        self.names(it.span, it.source.value.as_str(), !it.import_kind.is_type());
         walk::walk_import_declaration(self, it);
     }
 
     fn visit_export_from_declaration(&mut self, it: &ExportFromDeclaration<'a>) {
-        if !it.export_kind.is_type() {
-            self.json(it.span, it.source.value.as_str());
-        }
+        self.names(it.span, it.source.value.as_str(), !it.export_kind.is_type());
         walk::walk_export_from_declaration(self, it);
     }
 
     fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
-        if !it.export_kind.is_type() {
-            self.json(it.span, it.source.value.as_str());
-        }
+        self.names(it.span, it.source.value.as_str(), !it.export_kind.is_type());
         walk::walk_export_all_declaration(self, it);
     }
 
     fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
         if let Expression::StringLiteral(source) = &it.source {
-            self.json(it.span(), source.value.as_str());
+            self.names(it.span(), source.value.as_str(), true);
         }
         walk::walk_import_expression(self, it);
+    }
+
+    fn visit_ts_import_type(&mut self, it: &TSImportType<'a>) {
+        self.names(it.span, it.source.value.as_str(), false);
+        walk::walk_ts_import_type(self, it);
     }
 }
 
@@ -166,10 +242,115 @@ fn line_of(source: &str, offset: u32) -> usize {
         + 1
 }
 
+/// An import, an export, or an `export` on a declaration: what makes a file a module.
+fn is_module_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::ImportDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_)
+            | Statement::TSExportAssignment(_)
+            | Statement::TSNamespaceExportDeclaration(_)
+    )
+}
+
+/// tsc keeps or drops these two forms differently from the transform underneath, so they
+/// are settled here first.
+fn settle_empty_module_statements(program: &mut Program, verbatim: bool) {
+    if verbatim {
+        // `export { type T } from "x"` still loads "x": tsc writes `export {} from "x"`.
+        for statement in program.body.iter_mut() {
+            if let Statement::ExportFromDeclaration(export) = statement
+                && !export.export_kind.is_type()
+                && !export.specifiers.is_empty()
+                && export
+                    .specifiers
+                    .iter()
+                    .all(|specifier| specifier.export_kind.is_type())
+            {
+                export.specifiers.clear();
+            }
+        }
+    } else {
+        // Without it, an import or re-export that names nothing is dropped, load and all.
+        program.body.retain(|statement| match statement {
+            Statement::ImportDeclaration(import) => !import.specifiers.as_ref().is_some_and(|list| list.is_empty()),
+            Statement::ExportFromDeclaration(export) => !export.specifiers.is_empty(),
+            _ => true,
+        });
+    }
+}
+
+/// `declare const a: T; export { a };` tsc keeps the export of a name that has no
+/// JavaScript behind it. The transform drops it, so the file is refused.
+fn exported_declared_value(program: &Program, scoping: &Scoping) -> Option<Span> {
+    let declared = |name: &str| {
+        scoping
+            .get_root_binding(name.into())
+            .map(|symbol| scoping.symbol_flags(symbol))
+            .is_some_and(|flags| flags.contains(SymbolFlags::Ambient) && flags.intersects(SymbolFlags::Value))
+    };
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) if !export.export_kind.is_type() => {
+                for specifier in &export.specifiers {
+                    if !specifier.export_kind.is_type()
+                        && let ModuleExportName::IdentifierReference(local) = &specifier.local
+                        && declared(local.name.as_str())
+                    {
+                        return Some(specifier.span);
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::Identifier(local) = &export.declaration
+                    && declared(local.name.as_str())
+                {
+                    return Some(export.span);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The targets of the `/// <reference path="..." />` lines that open a file.
+fn reference_paths(source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in source.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.is_empty() || (line.starts_with("//") && !line.starts_with("///")) {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("///") else { break };
+        if let Some(at) = rest.find("path=")
+            && rest.trim_start().starts_with("<reference")
+        {
+            let value = &rest[at + 5..];
+            if let Some(quote) = value.chars().next().filter(|c| *c == '"' || *c == '\'')
+                && let Some(end) = value[1..].find(quote)
+            {
+                found.push(value[1..=end].to_string());
+            }
+        }
+    }
+    found
+}
+
 /// Compiles one TypeScript source file. `path` is used for messages and to tell `.mts`
 /// from `.ts`.
-pub fn transpile(path: &Path, source: &str, options: Options, names: &Names) -> Result<Output, String> {
+pub fn transpile(path: &Path, source: &str, options: Options) -> Result<Output, String> {
     let shown = path.display();
+    let refusal = |span: Span, what: &str| {
+        format!(
+            "{shown}:{}: {what}. kite build only compiles syntax it can show matches tsc; use tsc for this project",
+            line_of(source, span.start)
+        )
+    };
     let source_type = SourceType::from_path(path).map_err(|e| format!("{shown}: {e}"))?;
     if source_type.is_jsx() {
         return Err(format!(
@@ -188,20 +369,33 @@ pub fn transpile(path: &Path, source: &str, options: Options, names: &Names) -> 
     }
     let mut program = parsed.program;
 
-    let mut refusals = Refusals {
-        source,
+    let mut scan = Scan {
         esnext: options.esnext,
-        first: None,
+        ambient: 0,
+        refused: None,
+        specifiers: Vec::new(),
+        import_meta: false,
     };
-    refusals.visit_program(&program);
-    if let Some((span, what)) = refusals.first {
-        return Err(format!(
-            "{shown}:{}: {what}. kite build only compiles syntax it can show matches tsc; use tsc for this project",
-            line_of(refusals.source, span.start)
+    scan.visit_program(&program);
+    if let Some((span, what)) = scan.refused {
+        return Err(refusal(span, what));
+    }
+    // What tsc goes by, read before anything is removed.
+    let is_module = options.force_module || scan.import_meta || program.body.iter().any(is_module_statement);
+    let strict_already = program
+        .directives
+        .iter()
+        .any(|directive| directive.directive == "use strict");
+    let hashbang = program.hashbang.is_some();
+
+    settle_empty_module_statements(&mut program, options.verbatim_module_syntax);
+    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    if let Some(span) = exported_declared_value(&program, &scoping) {
+        return Err(refusal(
+            span,
+            "an export of a `declare`d name, which tsc keeps although nothing defines it",
         ));
     }
-
-    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
     // Nothing is lowered: only targets where tsc lowers nothing either are accepted.
     let mut transform = TransformOptions::from_target("esnext")?;
     transform.typescript.only_remove_type_imports = options.verbatim_module_syntax;
@@ -209,6 +403,7 @@ pub fn transpile(path: &Path, source: &str, options: Options, names: &Names) -> 
     if let Some(error) = transformed.diagnostics.first() {
         return Err(format!("{shown}: {error}"));
     }
+    let still_module_syntax = program.body.iter().any(is_module_statement);
 
     let print = CodegenOptions {
         indent_char: IndentChar::Space,
@@ -226,42 +421,51 @@ pub fn transpile(path: &Path, source: &str, options: Options, names: &Names) -> 
         .with_source_text(source)
         .build(&program);
     let mut code = printed.code;
-    let mut map = None;
-    if let Some(generated) = printed.map {
-        // tsc's field order, with the names the two files know each other by.
-        let raw: Value = serde_json::from_str(&generated.to_json_string()).map_err(|e| format!("{shown}: {e}"))?;
-        let mut ordered = Map::new();
-        ordered.insert("version".into(), Value::from(3));
-        ordered.insert("file".into(), Value::from(names.file));
-        ordered.insert("sourceRoot".into(), Value::from(""));
-        ordered.insert("sources".into(), Value::from(vec![names.source]));
-        ordered.insert(
-            "names".into(),
-            raw.get("names").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
-        );
-        ordered.insert(
-            "mappings".into(),
-            raw.get("mappings").cloned().unwrap_or_else(|| Value::from("")),
-        );
-        if options.inline_sources {
-            ordered.insert("sourcesContent".into(), Value::from(vec![source]));
+    let mut map = match printed.map {
+        None => None,
+        Some(generated) => {
+            let raw: Value = serde_json::from_str(&generated.to_json_string()).map_err(|e| format!("{shown}: {e}"))?;
+            let names = raw.get("names").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+            let mappings = raw
+                .get("mappings")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Some((names, mappings))
         }
-        let json = serde_json::to_string(&Value::Object(ordered)).map_err(|e| format!("{shown}: {e}"))?;
-        if !code.ends_with('\n') {
-            code.push('\n');
-        }
-        match options.source_maps {
-            SourceMaps::Inline => {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
-                code.push_str(&format!("//# sourceMappingURL=data:application/json;base64,{encoded}"));
-            }
-            _ => {
-                code.push_str(&format!("//# sourceMappingURL={}.map", names.file));
-                map = Some(json);
-            }
+    };
+
+    if !code.is_empty() && !code.ends_with('\n') {
+        code.push('\n');
+    }
+    if is_module && !still_module_syntax {
+        // A module with nothing left to import or export stays a module.
+        code.push_str("export {};\n");
+    }
+    if !is_module && options.always_strict && !strict_already {
+        // A script is put in strict mode, after a hashbang line if there is one.
+        let at = if hashbang {
+            code.find('\n').map_or(code.len(), |i| i + 1)
+        } else {
+            0
+        };
+        code.insert_str(at, "\"use strict\";\n");
+        if let Some((_, mappings)) = &mut map {
+            // One more generated line, which maps to nothing.
+            let at = if hashbang {
+                mappings.find(';').map_or(mappings.len(), |i| i + 1)
+            } else {
+                0
+            };
+            mappings.insert(at, ';');
         }
     }
-    Ok(Output { code, map })
+    Ok(Output {
+        code,
+        map,
+        specifiers: scan.specifiers,
+        references: reference_paths(source),
+    })
 }
 
 #[cfg(test)]
@@ -272,21 +476,26 @@ mod tests {
         file: "a.js",
         source: "../src/a.ts",
     };
+    const VERBATIM: Options = Options {
+        verbatim_module_syntax: true,
+        esnext: false,
+        always_strict: true,
+        force_module: false,
+        remove_comments: false,
+        source_maps: SourceMaps::None,
+        inline_sources: false,
+    };
+    const LOOSE: Options = Options {
+        verbatim_module_syntax: false,
+        ..VERBATIM
+    };
 
-    fn compile(source: &str, options: Options) -> Result<Output, String> {
-        transpile(Path::new("src/a.ts"), source, options, &NAMES)
+    fn compile(source: &str, options: Options) -> Result<Written, String> {
+        transpile(Path::new("src/a.ts"), source, options)?.finish(source, options, &NAMES)
     }
 
     fn js(source: &str) -> String {
-        compile(
-            source,
-            Options {
-                verbatim_module_syntax: true,
-                ..Options::default()
-            },
-        )
-        .unwrap()
-        .code
+        compile(source, VERBATIM).unwrap().code
     }
 
     #[test]
@@ -307,11 +516,74 @@ mod tests {
     #[test]
     fn an_import_used_only_as_a_type_is_dropped_without_verbatim_syntax() {
         let source = "import { A } from \"./a.js\";\nimport { b } from \"./b.js\";\nexport const c: A = b;\n";
-        let loose = compile(source, Options::default()).unwrap().code;
+        let loose = compile(source, LOOSE).unwrap().code;
         assert!(!loose.contains("./a.js"), "{loose}");
         assert!(loose.contains("./b.js"), "{loose}");
         let verbatim = js(source);
         assert!(verbatim.contains("./a.js"), "{verbatim}");
+    }
+
+    #[test]
+    fn imports_and_re_exports_that_name_nothing_follow_tsc() {
+        let source = "import {} from \"./a.js\";\nexport {} from \"./b.js\";\nexport { type T } from \"./c.js\";\nexport const x = 1;\n";
+        // Verbatim: all three modules are still loaded.
+        let verbatim = js(source);
+        for module in ["./a.js", "./b.js", "./c.js"] {
+            assert!(verbatim.contains(module), "{module}: {verbatim}");
+        }
+        assert!(verbatim.contains("export {} from \"./c.js\""), "{verbatim}");
+        // Otherwise none is.
+        let loose = compile(source, LOOSE).unwrap().code;
+        for module in ["./a.js", "./b.js", "./c.js"] {
+            assert!(!loose.contains(module), "{module}: {loose}");
+        }
+    }
+
+    #[test]
+    fn a_module_stays_a_module_and_a_script_becomes_strict() {
+        // Everything was a type: the module marker is added.
+        assert_eq!(js("export type T = number;\n").trim(), "export {};");
+        assert_eq!(
+            compile("import { A } from \"./a.js\";\nlet x: A;\n", LOOSE)
+                .unwrap()
+                .code,
+            "let x;\nexport {};\n"
+        );
+        // `import.meta` makes a module too.
+        assert!(js("console.log(import.meta.url);\n").ends_with("export {};\n"));
+        // No imports or exports: a script, which alwaysStrict puts in strict mode.
+        assert_eq!(js("const x: number = 1;\n"), "\"use strict\";\nconst x = 1;\n");
+        assert_eq!(
+            js("#!/usr/bin/env node\nconst x: number = 1;\n"),
+            "#!/usr/bin/env node\n\"use strict\";\nconst x = 1;\n"
+        );
+        assert_eq!(
+            js("\"use strict\";\nconst x: number = 1;\n")
+                .matches("use strict")
+                .count(),
+            1
+        );
+        let sloppy = Options {
+            always_strict: false,
+            ..VERBATIM
+        };
+        assert_eq!(
+            compile("const x: number = 1;\n", sloppy).unwrap().code,
+            "const x = 1;\n"
+        );
+        // Forced to be a module: the marker, and no directive.
+        let forced = Options {
+            force_module: true,
+            ..VERBATIM
+        };
+        assert_eq!(
+            compile("const x: number = 1;\n", forced).unwrap().code,
+            "const x = 1;\nexport {};\n"
+        );
+        assert_eq!(
+            compile("export const x: number = 1;\n", forced).unwrap().code,
+            "export const x = 1;\n"
+        );
     }
 
     #[test]
@@ -338,28 +610,51 @@ mod tests {
                 "a `using` declaration",
             ),
             ("export class C { accessor x = 1; }\n", "an `accessor` field"),
+            (
+                "declare const d: number;\nexport { d };\n",
+                "an export of a `declare`d name",
+            ),
+            (
+                "declare class D {}\nexport default D;\n",
+                "an export of a `declare`d name",
+            ),
         ] {
-            let error = compile(source, Options::default()).unwrap_err();
+            let error = compile(source, LOOSE).unwrap_err();
             assert!(error.contains(what), "{source}: {error}");
             assert!(error.contains("use tsc"), "{error}");
         }
-        let error = compile("export const a = 1;\nenum E { A }\n", Options::default()).unwrap_err();
+        let error = compile("export const a = 1;\nenum E { A }\n", LOOSE).unwrap_err();
         assert!(error.starts_with("src/a.ts:2: "), "{error}");
     }
 
     #[test]
     fn ambient_declarations_and_type_only_json_are_fine() {
         js(
-            "declare enum E { A }\ndeclare namespace N { const a: number; }\nimport type data from \"./data.json\";\nexport type T = typeof data | E | typeof N.a;\n",
+            "declare enum E { A }\ndeclare namespace N { const a: number; enum Inner { A } namespace Deep { const b: number; } }\n\
+            declare global { namespace NodeJS { interface ProcessEnv { X: string } } enum G { A } }\n\
+            declare module \"other\" { enum M { A } namespace Q { const c: number; } }\n\
+            import type data from \"./data.json\";\nexport type T = typeof data | E | typeof N.a;\n\
+            declare const local: number;\nexport type { local };\nexport type L = typeof local;\n",
         );
     }
 
     #[test]
+    fn every_named_module_and_reference_is_reported() {
+        let source = "/// <reference path=\"./globals.d.ts\" />\n/// <reference types=\"node\" />\n\
+            import type { A } from \"./a.js\";\nimport b from \"./b.js\";\nexport * from \"./c.js\";\n\
+            export { d } from \"./d.js\";\nexport type E = import(\"./e.js\").E;\nexport const f = () => import(\"./f.js\");\n\
+            export const g: A = b;\n";
+        let output = transpile(Path::new("src/a.ts"), source, VERBATIM).unwrap();
+        assert_eq!(
+            output.specifiers,
+            ["./a.js", "./b.js", "./c.js", "./d.js", "./e.js", "./f.js"]
+        );
+        assert_eq!(output.references, ["./globals.d.ts"]);
+    }
+
+    #[test]
     fn esnext_keeps_what_tsc_keeps() {
-        let options = Options {
-            esnext: true,
-            ..Options::default()
-        };
+        let options = Options { esnext: true, ..LOOSE };
         let out = compile(
             "export class C { accessor x = 1; }\nexport function f() { using a = null; return a; }\n",
             options,
@@ -374,8 +669,8 @@ mod tests {
 
     #[test]
     fn syntax_errors_and_jsx_are_reported() {
-        assert!(compile("export const = ;\n", Options::default()).is_err());
-        let error = transpile(Path::new("a.tsx"), "export const a = 1;\n", Options::default(), &NAMES).unwrap_err();
+        assert!(compile("export const = ;\n", LOOSE).is_err());
+        let error = transpile(Path::new("a.tsx"), "export const a = 1;\n", LOOSE).unwrap_err();
         assert!(error.contains("JSX"), "{error}");
     }
 
@@ -391,11 +686,12 @@ mod tests {
 
     #[test]
     fn source_maps_use_tscs_shape() {
+        let source = "export const a: number = 1;\n";
         let file = compile(
-            "export const a: number = 1;\n",
+            source,
             Options {
                 source_maps: SourceMaps::File,
-                ..Options::default()
+                ..LOOSE
             },
         )
         .unwrap();
@@ -409,11 +705,11 @@ mod tests {
         assert!(map.get("sourcesContent").is_none());
 
         let inline = compile(
-            "export const a: number = 1;\n",
+            source,
             Options {
                 source_maps: SourceMaps::Inline,
                 inline_sources: true,
-                ..Options::default()
+                ..LOOSE
             },
         )
         .unwrap();
@@ -421,9 +717,33 @@ mod tests {
         let url = inline.code.rsplit("base64,").next().unwrap();
         let decoded = base64::engine::general_purpose::STANDARD.decode(url).unwrap();
         let map: Value = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(
-            map["sourcesContent"],
-            serde_json::json!(["export const a: number = 1;\n"])
-        );
+        assert_eq!(map["sourcesContent"], serde_json::json!([source]));
+
+        // The line added for strict mode shifts every mapping down by one.
+        let script = "const a: number = 1;\n";
+        let plain = compile(
+            script,
+            Options {
+                source_maps: SourceMaps::File,
+                always_strict: false,
+                ..LOOSE
+            },
+        )
+        .unwrap();
+        let strict = compile(
+            script,
+            Options {
+                source_maps: SourceMaps::File,
+                ..LOOSE
+            },
+        )
+        .unwrap();
+        let mappings = |written: &Written| {
+            serde_json::from_str::<Value>(written.map.as_ref().unwrap()).unwrap()["mappings"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(mappings(&strict), format!(";{}", mappings(&plain)));
     }
 }

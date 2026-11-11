@@ -13,12 +13,18 @@ use crate::transpile::{Options, SourceMaps};
 /// A project ready to compile.
 #[derive(Debug)]
 pub struct Project {
-    pub root_dir: PathBuf,
+    /// `rootDir`, when the config sets it. Otherwise tsc uses the folder the sources share.
+    pub root_dir: Option<PathBuf>,
     pub out_dir: PathBuf,
     pub options: Options,
     /// `module` is a Node mode, where a file's package decides whether it is an ES module.
     pub node_modules_format: bool,
-    /// The files to compile, absolute and sorted. Declaration files are left out.
+    /// `baseUrl`, which bare module names may be relative to.
+    pub base_url: Option<PathBuf>,
+    /// `paths`: each pattern with the absolute patterns it maps to. Both may hold one `*`.
+    pub paths: Vec<(String, Vec<PathBuf>)>,
+    /// The files `files` and `include` select, absolute and sorted, declaration files
+    /// left out. tsc also compiles the project files these import.
     pub files: Vec<PathBuf>,
 }
 
@@ -148,6 +154,15 @@ fn located(dir: &Path, value: &Value, key: &str, from: &Path) -> Result<Vec<Loca
         .ok_or_else(|| format!("{}: {key:?} must be a list of strings", from.display()))
 }
 
+/// `${configDir}` at the start of a path means the folder of the config being built,
+/// whichever config in the `extends` chain wrote it.
+fn expand(value: &str, config_dir: &Path) -> PathBuf {
+    match value.strip_prefix("${configDir}") {
+        Some(rest) => config_dir.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    }
+}
+
 fn load(path: &Path, depth: usize) -> Result<Raw, String> {
     if depth > 16 {
         return Err(format!(
@@ -225,8 +240,10 @@ fn has_wildcard(part: &str) -> bool {
     part.contains(['*', '?'])
 }
 
-/// `*` and `?` within one path component. A component that begins with a wildcard does
-/// not match a name that begins with a dot, unless `dots` allows it.
+/// `*` and `?` within one path component. As in tsc, a leading `*` matches nothing or a
+/// run that does not begin with a dot, and a leading `?` matches one character that is not
+/// a dot, so `*.ts` skips `.hidden.ts` while `*.*ts` still reaches `.e.ts`. `dots` lifts
+/// that rule, for exclude patterns.
 fn component_matches(pattern: &str, name: &str, dots: bool) -> bool {
     fn go(p: &[u8], n: &[u8]) -> bool {
         match p.split_first() {
@@ -236,10 +253,15 @@ fn component_matches(pattern: &str, name: &str, dots: bool) -> bool {
             Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
         }
     }
-    if !dots && pattern.starts_with(['*', '?']) && name.starts_with('.') {
-        return false;
+    let (p, n) = (pattern.as_bytes(), name.as_bytes());
+    if dots {
+        return go(p, n);
     }
-    go(pattern.as_bytes(), name.as_bytes())
+    match p.split_first() {
+        Some((b'*', rest)) => go(rest, n) || (n.first().is_some_and(|c| *c != b'.') && go(p, n)),
+        Some((b'?', _)) => n.first().is_some_and(|c| *c != b'.') && go(p, n),
+        _ => go(p, n),
+    }
 }
 
 fn parts(path: &Path) -> Vec<String> {
@@ -315,6 +337,7 @@ fn excluded(pattern: &[String], path: &[String]) -> bool {
 }
 
 fn select_files(raw: &Raw, config_dir: &Path, out_dir: &Path) -> Vec<PathBuf> {
+    let place = |(dir, pattern): &Located| normalize(&dir.join(expand(pattern, config_dir)));
     let mut chosen = BTreeSet::new();
     let default_include = [(config_dir.to_path_buf(), "**/*".to_string())];
     let include: &[Located] = match (&raw.include, &raw.files) {
@@ -322,8 +345,8 @@ fn select_files(raw: &Raw, config_dir: &Path, out_dir: &Path) -> Vec<PathBuf> {
         (None, Some(_)) => &[],
         (None, None) => &default_include,
     };
-    for (dir, pattern) in include {
-        let mut pattern = parts(&normalize(&dir.join(pattern)));
+    for entry in include {
+        let mut pattern = parts(&place(entry));
         // A last component with no extension and no wildcard names a folder.
         if pattern.last().is_some_and(|last| !last.contains(['.', '*', '?'])) {
             pattern.extend(["**".to_string(), "*".to_string()]);
@@ -337,18 +360,15 @@ fn select_files(raw: &Raw, config_dir: &Path, out_dir: &Path) -> Vec<PathBuf> {
         walk_include(&base, &pattern[literal..], &mut chosen, &mut BTreeSet::new());
     }
     let exclude: Vec<Vec<String>> = match &raw.exclude {
-        Some(list) => list
-            .iter()
-            .map(|(dir, pattern)| parts(&normalize(&dir.join(pattern))))
-            .collect(),
+        Some(list) => list.iter().map(|entry| parts(&place(entry))).collect(),
         None => vec![parts(out_dir)],
     };
     chosen.retain(|file| {
         let path = parts(file);
         !exclude.iter().any(|pattern| excluded(pattern, &path))
     });
-    for (dir, file) in raw.files.iter().flatten() {
-        chosen.insert(normalize(&dir.join(file)));
+    for entry in raw.files.iter().flatten() {
+        chosen.insert(place(entry));
     }
     chosen
         .into_iter()
@@ -374,16 +394,16 @@ pub fn load_project(config: &Path, skip_declarations: bool) -> Result<Project, S
             .and_then(Value::as_str)
             .map(str::to_ascii_lowercase)
     };
-    let dir_of = |key: &str| -> Result<PathBuf, String> {
-        let value = raw.options.get(key).and_then(Value::as_str);
-        let value = value.ok_or_else(|| format!("{shown}: compilerOptions.{key} must be set for kite build"))?;
-        let base = raw
-            .option_dirs
+    let defined_in = |key: &str| {
+        raw.option_dirs
             .get(key)
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .unwrap_or(config_dir.clone());
-        Ok(normalize(&base.join(value)))
+            .unwrap_or_else(|| config_dir.clone())
+    };
+    let dir_of = |key: &str| -> Option<PathBuf> {
+        let value = raw.options.get(key).and_then(Value::as_str)?;
+        Some(normalize(&defined_in(key).join(expand(value, &config_dir))))
     };
 
     if flag("noEmit") || flag("emitDeclarationOnly") {
@@ -451,20 +471,59 @@ pub fn load_project(config: &Path, skip_declarations: bool) -> Result<Project, S
         (false, false) => SourceMaps::None,
     };
 
-    let root_dir = dir_of("rootDir")?;
-    let out_dir = dir_of("outDir")?;
+    // `strict` turns alwaysStrict on unless it is set itself.
+    let always_strict = raw
+        .options
+        .get("alwaysStrict")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| flag("strict"));
+    let detection = text("moduleDetection").unwrap_or_else(|| "auto".to_string());
+    if !["auto", "legacy", "force"].contains(&detection.as_str()) {
+        return Err(format!("{shown}: unknown moduleDetection {detection:?}"));
+    }
+    // Under a Node module setting every file kite build accepts is an ES module by its
+    // package or extension, which `auto` counts as a module.
+    let force_module = detection == "force" || (detection == "auto" && node_modules_format);
+
+    let out_dir =
+        dir_of("outDir").ok_or_else(|| format!("{shown}: compilerOptions.outDir must be set for kite build"))?;
+    let base_url = dir_of("baseUrl");
+    let mut paths = Vec::new();
+    if let Some(Value::Object(map)) = raw.options.get("paths") {
+        let base = base_url.clone().unwrap_or_else(|| defined_in("paths"));
+        for (pattern, targets) in map {
+            let targets = targets
+                .as_array()
+                .and_then(|list| {
+                    list.iter()
+                        .map(|v| v.as_str().map(|t| normalize(&base.join(expand(t, &config_dir)))))
+                        .collect()
+                })
+                .ok_or_else(|| format!("{shown}: compilerOptions.paths[{pattern:?}] must be a list of strings"))?;
+            paths.push((pattern.clone(), targets));
+        }
+    }
     let files = select_files(&raw, &config_dir, &out_dir);
+    if files.is_empty() {
+        return Err(format!(
+            "{shown}: no TypeScript files match this project's files and include"
+        ));
+    }
     Ok(Project {
-        root_dir,
+        root_dir: dir_of("rootDir"),
         out_dir,
         options: Options {
             verbatim_module_syntax: verbatim,
             esnext: target == "esnext",
+            always_strict,
+            force_module,
             remove_comments: flag("removeComments"),
             source_maps,
             inline_sources: flag("inlineSources"),
         },
         node_modules_format,
+        base_url,
+        paths,
         files,
     })
 }
@@ -527,6 +586,7 @@ mod tests {
             "src/types.d.ts",
             "src/.hidden/c.ts",
             "src/.dot.ts",
+            "src/.e.ts",
             "src/node_modules/x/d.ts",
             "src/note.txt",
             "dist/e.ts",
@@ -559,6 +619,10 @@ mod tests {
             &format!("{BASE}, \"include\": [\"**/*\"], \"exclude\": [\"**/deep\", \"dist\", \"oth*\"] }}"),
         );
         assert_eq!(t.files("exclude.json"), ["src/a.ts"]);
+
+        // A leading `*` may match nothing, so `*.*ts` reaches `.e.ts`, which `*.ts` skips.
+        t.write("dots.json", &format!("{BASE}, \"include\": [\"src/*.*ts\"] }}"));
+        assert_eq!(t.files("dots.json"), ["src/.dot.ts", "src/.e.ts", "src/a.ts"]);
     }
 
     #[cfg(unix)]
@@ -592,7 +656,7 @@ mod tests {
         );
         let project = load_project(&t.0.join("app/tsconfig.json"), false).unwrap();
         // rootDir and include come from the base and stay relative to it; outDir is the app's.
-        assert_eq!(project.root_dir, t.0.join("base/src"));
+        assert_eq!(project.root_dir, Some(t.0.join("base/src")));
         assert_eq!(project.out_dir, t.0.join("app/out"));
         assert_eq!(project.files, [t.0.join("base/lib/a.ts")]);
         assert!(project.options.remove_comments && project.options.verbatim_module_syntax);
@@ -613,8 +677,47 @@ mod tests {
     }
 
     #[test]
+    fn strictness_module_detection_and_config_dir_are_read_as_tsc_reads_them() {
+        let t = Temp::new("modes");
+        t.write("src/a.ts", "export {};\n");
+        let load = |options: &str| {
+            t.write("tsconfig.json", &format!("{{ \"compilerOptions\": {{ \"target\": \"es2022\", \"isolatedModules\": true, \"outDir\": \"dist\"{options} }} }}"));
+            load_project(&t.0.join("tsconfig.json"), false).unwrap()
+        };
+        // Defaults: not strict, and under module ES2015 a file is a module only by its contents.
+        let plain = load("");
+        assert!(!plain.options.always_strict && !plain.options.force_module);
+        assert_eq!(plain.root_dir, None);
+        assert!(load(", \"strict\": true").options.always_strict);
+        assert!(
+            !load(", \"strict\": true, \"alwaysStrict\": false")
+                .options
+                .always_strict
+        );
+        assert!(load(", \"alwaysStrict\": true").options.always_strict);
+        assert!(load(", \"moduleDetection\": \"force\"").options.force_module);
+        assert!(load(", \"module\": \"NodeNext\"").options.force_module);
+        assert!(
+            !load(", \"module\": \"NodeNext\", \"moduleDetection\": \"legacy\"")
+                .options
+                .force_module
+        );
+
+        // ${configDir} is the folder of the config being built, wherever it is written.
+        t.write("shared/base.json", "{ \"compilerOptions\": { \"target\": \"es2022\", \"isolatedModules\": true, \"rootDir\": \"${configDir}/src\", \"outDir\": \"${configDir}/out\", \"paths\": { \"@/*\": [\"${configDir}/src/*\"] } }, \"include\": [\"${configDir}/src\"] }");
+        t.write("app/src/b.ts", "export {};\n");
+        t.write("app/tsconfig.json", "{ \"extends\": \"../shared/base.json\" }");
+        let app = load_project(&t.0.join("app/tsconfig.json"), false).unwrap();
+        assert_eq!(app.root_dir, Some(t.0.join("app/src")));
+        assert_eq!(app.out_dir, t.0.join("app/out"));
+        assert_eq!(app.files, [t.0.join("app/src/b.ts")]);
+        assert_eq!(app.paths, [("@/*".to_string(), vec![t.0.join("app/src/*")])]);
+    }
+
+    #[test]
     fn what_cannot_be_reproduced_is_refused() {
         let t = Temp::new("refuse");
+        t.write("src/a.ts", "export {};\n");
         let refusal = |options: &str| {
             t.write("tsconfig.json", &format!("{{ \"compilerOptions\": {{ {options} }} }}"));
             load_project(&t.0.join("tsconfig.json"), false).unwrap_err()
@@ -635,7 +738,10 @@ mod tests {
                 "isolatedModules or verbatimModuleSyntax",
             ),
             (&ok.replace(", \"outDir\": \"dist\"", ""), "outDir must be set"),
-            (&ok.replace("\"rootDir\": \"src\", ", ""), "rootDir must be set"),
+            (
+                &format!("{ok}, \"moduleDetection\": \"sometimes\""),
+                "unknown moduleDetection",
+            ),
             (&format!("{ok}, \"noEmit\": true"), "emits no JavaScript"),
             (&format!("{ok}, \"declaration\": true"), "--skip-declarations"),
             (&format!("{ok}, \"composite\": true"), "--skip-declarations"),

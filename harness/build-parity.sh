@@ -25,17 +25,30 @@ if [ "$(node -e 'try { console.log(require(process.argv[1]).version) } catch { c
   (cd "$work" && npm install --no-save --no-audit --no-fund --loglevel=error "typescript@$TYPESCRIPT_VERSION" >/dev/null)
 fi
 
-# The comparison must notice a changed operator, or it proves nothing.
+# The comparison must tell equal code from different code, or it proves nothing.
 check=$work/self-check
-rm -rf "$check" && mkdir -p "$check/a" "$check/b"
-echo 'export const a = -1 + (2);' > "$check/a/x.js"
-echo 'export const a = -1 + 2;' > "$check/b/x.js"
-(cd "$work" && node "$here/ast-diff.mjs" "$check/a" "$check/b" >/dev/null) || { echo "ast-diff rejects equal code" >&2; exit 1; }
-echo 'export const a = +1 + 2;' > "$check/b/x.js"
-if (cd "$work" && node "$here/ast-diff.mjs" "$check/a" "$check/b" >/dev/null); then
-  echo "ast-diff misses a changed operator" >&2
-  exit 1
-fi
+same() {
+  rm -rf "$check" && mkdir -p "$check/a" "$check/b"
+  printf '%s\n' "$1" > "$check/a/x.js"
+  printf '%s\n' "$2" > "$check/b/x.js"
+  (cd "$work" && node "$here/ast-diff.mjs" "$check/a" "$check/b" >/dev/null)
+}
+equal() { same "$1" "$2" || { echo "ast-diff rejects equal code: $1 | $2" >&2; exit 1; }; }
+differ() { if same "$1" "$2"; then echo "ast-diff misses a difference: $1 | $2" >&2; exit 1; fi; }
+equal 'export const a = -1 + (2);' 'export const a = -1 + 2;'
+equal 'import {} from "x"; const o = { a: a }; if (a) { b(); }' 'import "x"; const o = { a }; if (a) b();'
+equal 'const n = 0x10n; const t = `a`;;' 'const n = 16n; const t = `a`;'
+differ 'export const a = -1 + 2;' 'export const a = +1 + 2;'
+differ '({ a = 1 } = o);' '({ a = 2 } = o);'
+differ 'if (x) ; else y();' 'if (x) y();'
+differ 'import defer * as ns from "x";' 'import * as ns from "x";'
+differ 'import {} from "x"; a();' 'a();'
+differ 'export {} from "x";' 'export {};'
+differ '"use strict"; a();' 'a();'
+differ 'a(); export {};' 'a();'
+differ 'if (a) { let b; }' 'if (a) let b;'
+differ 'class A { static x = 1; }' 'class A { x = 1; }'
+differ 'let a = 1;' 'const a = 1;'
 
 failed=0
 for fixture in "$@"; do
