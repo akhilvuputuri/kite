@@ -452,7 +452,11 @@ pub fn load_project(config: &Path, skip_declarations: bool) -> Result<Project, S
     }
     let module = text("module").unwrap_or_else(|| "es2015".to_string());
     let node_modules_format = ["node16", "node18", "node20", "nodenext"].contains(&module.as_str());
-    if !node_modules_format && !["es2015", "es6", "es2020", "es2022", "esnext", "preserve"].contains(&module.as_str()) {
+    if module == "preserve" {
+        // There tsc keeps each file's module syntax as written: no `export {}`, no "use strict".
+        return Err(refuse("module \"Preserve\" is not supported yet"));
+    }
+    if !node_modules_format && !["es2015", "es6", "es2020", "es2022", "esnext"].contains(&module.as_str()) {
         return Err(refuse(&format!(
             "kite build writes ES modules only, not module {module:?}"
         )));
@@ -739,6 +743,7 @@ mod tests {
             ),
             (&ok.replace("es2022", "es2020"), "target must be"),
             (&ok.replace("esnext", "commonjs"), "ES modules only"),
+            (&ok.replace("esnext", "preserve"), "Preserve"),
             (
                 &ok.replace("\"isolatedModules\": true, ", ""),
                 "isolatedModules or verbatimModuleSyntax",

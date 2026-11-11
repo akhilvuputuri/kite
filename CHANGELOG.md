@@ -16,7 +16,8 @@
   and `inlineSources`.
 - It refuses what it cannot show matches `tsc`, naming the file and line: enums, namespaces,
   decorators, JSX, `import =`, `export =`, JSON imports, exports of `declare`d names,
-  CommonJS output, `using` and `accessor` below target ESNext, and targets below ES2022.
+  CommonJS output, `module` Preserve, `using` and `accessor` below target ESNext, and
+  targets below ES2022.
   Declaration files still need `tsc`; `--skip-declarations` builds the JavaScript alone.
 - Not followed: an import by package name that leads to a workspace package's sources,
   unless `paths` or `baseUrl` maps it, and a folder import that its own `package.json`

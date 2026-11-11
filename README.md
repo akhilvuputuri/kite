@@ -138,23 +138,24 @@ files, and a build that is refused writes nothing.
   as syntax trees (`harness/build-parity.sh`). Three spellings count as equal:
   `import {} from "x"` and `import "x"`, `{ a: a }` and `{ a }`, and a single statement
   with or without braces around it.
-- **What it compiles.** Syntax that erases to the JavaScript underneath, plus constructor
-  parameter properties, for `target` ES2022 or later and ES module output. Like `tsc`, it
-  also compiles the project files that the selected files import, drops imports only
-  used as types unless `verbatimModuleSyntax` is on, ends a module that has nothing left
-  to import or export with `export {}`, and opens a script with `"use strict"` under
-  `strict`.
+- **What it compiles.** Syntax that erases to the JavaScript underneath, plus
+  constructor parameter properties, for `target` ES2022 or later and ES module output
+  (`module` ES2015 to ESNext, or a Node setting). Like `tsc`, it also compiles the
+  project files that the selected files import, drops imports only used as types unless
+  `verbatimModuleSyntax` is on, ends a module that has nothing left to import or export
+  with `export {}`, and opens a script with `"use strict"` under `strict`.
 - **What it reads.** `extends` (paths, packages and lists), `files`, `include`, `exclude`,
   `${configDir}`, `rootDir` (worked out from the sources when unset), `outDir`, `target`,
   `module`, `moduleDetection`, `strict`, `alwaysStrict`, `verbatimModuleSyntax`,
   `isolatedModules`, `removeComments`, `baseUrl`, `paths`, `sourceMap`, `inlineSourceMap`
   and `inlineSources`.
-- **What it refuses.** Anything `tsc` would turn into different JavaScript, with the file
-  and line: enums, namespaces, decorators, JSX, `import =` and `export =`, JSON imports,
-  exports of `declare`d names, CommonJS output, and `using` or `accessor` below `target`
-  ESNext. A project must set `outDir`, and `isolatedModules` or `verbatimModuleSyntax`,
-  so that every file compiles on its own. Declaration files need `tsc`;
-  `--skip-declarations` says the JavaScript alone is wanted.
+- **What it refuses.** Anything `tsc` would turn into different JavaScript, with the
+  file and line: enums, namespaces, decorators, JSX, `import =` and `export =`, JSON
+  imports, exports of `declare`d names, CommonJS output, `module` Preserve, and `using`
+  or `accessor` below `target` ESNext. A project must set `outDir`, and
+  `isolatedModules` or `verbatimModuleSyntax`, so that every file compiles on its own.
+  Declaration files need `tsc`; `--skip-declarations` says the JavaScript alone is
+  wanted.
 - **Known gaps.** `tsc` compiles every project file an import leads to. `kite build`
   follows relative imports, `paths` and `baseUrl`, in source and declaration files, but
   not an import by package name that leads to a workspace package's sources, and it

@@ -154,14 +154,15 @@ fn resolve(project: &Project, from: &Path, specifier: &str) -> Option<PathBuf> {
                 }
             }
         }
+        // A pattern that matches is the whole answer: when none of its targets exists, tsc
+        // looks in node_modules next, never under baseUrl.
         if let Some((targets, captured, _)) = best {
             bases.extend(
                 targets
                     .iter()
                     .map(|t| PathBuf::from(t.to_string_lossy().replacen('*', captured, 1))),
             );
-        }
-        if let Some(base_url) = &project.base_url {
+        } else if let Some(base_url) = &project.base_url {
             bases.push(base_url.join(specifier));
         }
     }
@@ -460,13 +461,17 @@ mod tests {
                     "src/index.ts",
                     "/// <reference path=\"./referenced.ts\" />\nimport { a } from \"./util.js\";\nimport type { T } from \"./only-type.js\";\n\
                      import { m } from \"@lib/mapped\";\nimport { b } from \"lib/by-base-url.js\";\nimport { e } from \"./excluded.js\";\n\
-                     import fs from \"node:fs\";\nimport { d } from \"./declared.js\";\nexport const x: T = [a, m, b, e, fs, d];\n",
+                     import fs from \"node:fs\";\nimport { d } from \"./declared.js\";\nimport \"@lib/absent\";\n\
+                     export const x: T = [a, m, b, e, fs, d];\n",
                 ),
                 (
                     "src/util.ts",
                     "import { c } from \"./chain.js\";\nexport const a = c;\n",
                 ),
                 ("src/chain.ts", "export const c = 1;\n"),
+                // Matches the `@lib/*` pattern, whose target does not exist. baseUrl would
+                // find this file, but tsc does not look there once a pattern has matched.
+                ("@lib/absent.ts", "export {};\n"),
                 ("src/only-type.ts", "export type T = unknown[];\n"),
                 ("src/excluded.ts", "export const e = 1;\n"),
                 ("src/referenced.ts", "var referenced = 1;\n"),
@@ -491,6 +496,7 @@ mod tests {
             assert!(dir.join(format!("dist/{built}.js")).is_file(), "{built}");
         }
         assert!(!dir.join("dist/src/unused.js").exists());
+        assert!(!dir.join("dist/@lib/absent.js").exists());
         assert!(!dir.join("dist/src/declared.js").exists() && !dir.join("dist/src/declared.d.js").exists());
         fs::remove_dir_all(dir).unwrap();
     }
