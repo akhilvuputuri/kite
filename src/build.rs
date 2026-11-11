@@ -131,21 +131,35 @@ fn resolve(project: &Project, from: &Path, specifier: &str) -> Option<PathBuf> {
     } else if Path::new(specifier).is_absolute() {
         bases.push(PathBuf::from(specifier));
     } else {
+        // tsc's rule: an exact pattern wins, then the one whose text before `*` is longest.
+        let mut best: Option<(&Vec<PathBuf>, &str, usize)> = None;
         for (pattern, targets) in &project.paths {
-            let captured = match pattern.split_once('*') {
-                Some((before, after)) => specifier
-                    .strip_prefix(before)
-                    .and_then(|rest| rest.strip_suffix(after))
-                    .filter(|_| specifier.len() >= before.len() + after.len()),
-                None => (pattern == specifier).then_some(""),
-            };
-            if let Some(captured) = captured {
-                bases.extend(
-                    targets
-                        .iter()
-                        .map(|t| PathBuf::from(t.to_string_lossy().replacen('*', captured, 1))),
-                );
+            match pattern.split_once('*') {
+                None if pattern == specifier => {
+                    best = Some((targets, "", usize::MAX));
+                    break;
+                }
+                None => {}
+                Some((before, after)) => {
+                    let fits = specifier.len() >= before.len() + after.len()
+                        && specifier.starts_with(before)
+                        && specifier.ends_with(after);
+                    if fits && best.is_none_or(|(_, _, length)| before.len() > length) {
+                        best = Some((
+                            targets,
+                            &specifier[before.len()..specifier.len() - after.len()],
+                            before.len(),
+                        ));
+                    }
+                }
             }
+        }
+        if let Some((targets, captured, _)) = best {
+            bases.extend(
+                targets
+                    .iter()
+                    .map(|t| PathBuf::from(t.to_string_lossy().replacen('*', captured, 1))),
+            );
         }
         if let Some(base_url) = &project.base_url {
             bases.push(base_url.join(specifier));
@@ -202,49 +216,84 @@ struct Compiled {
     extension: &'static str,
 }
 
+/// What one file contributed: its compiled form, unless it is a declaration file, and
+/// the modules and reference paths it names.
+struct Read {
+    compiled: Option<Compiled>,
+    specifiers: Vec<String>,
+    references: Vec<String>,
+}
+
 /// Compiles the selected files and, as tsc does, every project file they import, however
-/// far that leads. Nothing is written here, so a refusal leaves the old build untouched.
+/// far that leads. Declaration files are read for their imports only. Nothing is written
+/// here, so a refusal leaves the old build untouched.
 fn compile_all(project: &Project, jobs: usize) -> Result<BTreeMap<PathBuf, Compiled>, String> {
     let mut modules = HashMap::new();
-    let mut known: BTreeSet<PathBuf> = project.files.iter().cloned().collect();
-    let mut round: Vec<PathBuf> = project.files.clone();
+    let mut round: Vec<PathBuf> = project.files.iter().chain(&project.declarations).cloned().collect();
+    let mut known: BTreeSet<PathBuf> = round.iter().cloned().collect();
     let mut compiled = BTreeMap::new();
     while !round.is_empty() {
         let mut batch = Vec::with_capacity(round.len());
         for source in round.drain(..) {
-            let extension = output_extension(project, &source, &mut modules)?;
+            let name = file_name(&source);
+            let extension = if is_declaration(&name) {
+                None
+            } else {
+                Some(output_extension(project, &source, &mut modules)?)
+            };
             batch.push((source, extension));
         }
-        let outputs = pool::map(&batch, jobs, |(source, extension)| -> Result<Compiled, String> {
+        let read = pool::map(&batch, jobs, |(source, extension)| -> Result<Read, String> {
             let text = fs::read_to_string(source).map_err(|e| format!("{}: {e}", source.display()))?;
-            let output = transpile::transpile(source, &text, project.options)?;
-            Ok(Compiled {
-                text,
-                output,
-                extension,
+            let Some(extension) = *extension else {
+                let (specifiers, references) = transpile::scan_declaration(source, &text)?;
+                return Ok(Read {
+                    compiled: None,
+                    specifiers,
+                    references,
+                });
+            };
+            // Under `auto`, an `.mts` file is a module by its name alone.
+            let by_name = project.auto_detection && extension == "mjs";
+            let options = transpile::Options {
+                force_module: project.options.force_module || by_name,
+                ..project.options
+            };
+            let mut output = transpile::transpile(source, &text, options)?;
+            let (specifiers, references) = (
+                std::mem::take(&mut output.specifiers),
+                std::mem::take(&mut output.references),
+            );
+            Ok(Read {
+                compiled: Some(Compiled {
+                    text,
+                    output,
+                    extension,
+                }),
+                specifiers,
+                references,
             })
         })?;
-        for ((source, _), result) in batch.into_iter().zip(outputs) {
+        for ((source, _), file) in batch.into_iter().zip(read) {
             let dir = source.parent().unwrap_or(Path::new("/")).to_path_buf();
-            let found = result
-                .output
+            let found = file
                 .specifiers
                 .iter()
                 .filter_map(|specifier| resolve(project, &source, specifier))
                 .chain(
-                    result
-                        .output
-                        .references
+                    file.references
                         .iter()
                         .map(|path| normalize(&dir.join(path)))
                         .filter(|p| p.is_file()),
                 );
             for next in found {
-                if !is_declaration(&file_name(&next)) && known.insert(next.clone()) {
+                if known.insert(next.clone()) {
                     round.push(next);
                 }
             }
-            compiled.insert(source, result);
+            if let Some(result) = file.compiled {
+                compiled.insert(source, result);
+            }
         }
     }
     Ok(compiled)
@@ -272,7 +321,11 @@ pub fn build(options: &BuildOptions) -> Result<u8, String> {
     let compiled = compile_all(&project, options.jobs)?;
 
     let sources: Vec<PathBuf> = compiled.keys().cloned().collect();
-    let root_dir = project.root_dir.clone().unwrap_or_else(|| common_dir(&sources));
+    let root_dir = match (&project.root_dir, sources.is_empty()) {
+        (Some(set), _) => set.clone(),
+        (None, true) => project.out_dir.clone(),
+        (None, false) => common_dir(&sources),
+    };
     let mut files = Vec::with_capacity(compiled.len());
     for (source, result) in compiled {
         let relative = source.strip_prefix(&root_dir).map_err(|_| {
@@ -439,6 +492,70 @@ mod tests {
         }
         assert!(!dir.join("dist/src/unused.js").exists());
         assert!(!dir.join("dist/src/declared.js").exists() && !dir.join("dist/src/declared.d.js").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_are_followed_the_way_tsc_follows_them() {
+        let dir = project(
+            "rules",
+            &[
+                MODULE,
+                (
+                    "tsconfig.json",
+                    r#"{ "compilerOptions": { "target": "ES2022", "module": "ESNext", "strict": true,
+                        "isolatedModules": true, "outDir": "dist", "composite": true,
+                        "paths": { "*": ["./other/*"], "@lib/*": ["./lib/*"], "exact": ["./lib/exact.ts"] } },
+                        "files": ["src/deep/index.ts", "src/deep/globals.d.ts"] }"#,
+                ),
+                (
+                    "src/deep/index.ts",
+                    "import { a } from \"@lib/a\";\nimport { e } from \"exact\";\nimport { o } from \"only-other\";\n\
+                     export const t = () => import(`./tpl.js`);\nexport const x = [a, e, o];\n",
+                ),
+                (
+                    "src/deep/globals.d.ts",
+                    "import type { G } from \"./from-dts.js\";\ndeclare global { var g: G; }\n",
+                ),
+                ("src/deep/from-dts.ts", "export type G = number;\n"),
+                ("src/deep/tpl.ts", "export const tpl = 1;\n"),
+                ("src/deep/named.mts", "const n: number = 1;\nvoid n;\n"),
+                ("lib/a.ts", "export const a = 1;\n"),
+                ("lib/exact.ts", "export const e = 1;\n"),
+                ("other/@lib/a.ts", "export const a = 2;\n"),
+                ("other/exact.ts", "export const e = 2;\n"),
+                (
+                    "other/only-other.ts",
+                    "import \"../src/deep/named.mjs\";\nexport const o = 1;\n",
+                ),
+            ],
+        );
+        let built = build(&BuildOptions {
+            start: dir.clone(),
+            project: None,
+            skip_declarations: true,
+            jobs: 2,
+            quiet: true,
+        });
+        assert_eq!(built, Ok(0));
+        // composite: laid out from the config's folder, not from the folder the sources share.
+        for file in [
+            "src/deep/index.js",
+            "src/deep/from-dts.js",
+            "src/deep/tpl.js",
+            "lib/a.js",
+            "lib/exact.js",
+            "other/only-other.js",
+        ] {
+            assert!(dir.join("dist").join(file).is_file(), "{file}");
+        }
+        // The longest matching `paths` prefix and the exact pattern win over `*`.
+        assert!(!dir.join("dist/other/@lib/a.js").exists() && !dir.join("dist/other/exact.js").exists());
+        // An .mts file is a module by its name: no "use strict", and the module marker.
+        assert_eq!(
+            fs::read_to_string(dir.join("dist/src/deep/named.mjs")).unwrap(),
+            "const n = 1;\nvoid n;\nexport {};\n"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

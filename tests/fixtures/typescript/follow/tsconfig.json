@@ -1,6 +1,7 @@
 {
-  // Only the entry point is listed: tsc compiles what it imports as well. rootDir is left
-  // for tsc to work out, and every file is a module whatever it contains.
+  // Only the entry point and a declaration file are listed: tsc compiles what they import
+  // as well. rootDir is left for tsc to work out, and every file is a module whatever it
+  // contains. Of two `paths` patterns that match, the longer prefix wins.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -11,8 +12,8 @@
     "inlineSourceMap": true,
     "inlineSources": true,
     "outDir": "${configDir}/dist",
-    "paths": { "@lib/*": ["./lib/*"] }
+    "paths": { "*": ["./other/*"], "@lib/*": ["./lib/*"] }
   },
-  "files": ["src/index.ts"],
+  "files": ["src/index.ts", "src/globals.d.ts"],
   "exclude": ["src/excluded.ts"]
 }

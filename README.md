@@ -155,9 +155,11 @@ files, and a build that is refused writes nothing.
   ESNext. A project must set `outDir`, and `isolatedModules` or `verbatimModuleSyntax`,
   so that every file compiles on its own. Declaration files need `tsc`;
   `--skip-declarations` says the JavaScript alone is wanted.
-- **Known gaps.** An import by package name is followed only through `paths` and
-  `baseUrl`, so a workspace package whose sources `tsc` would compile along with this
-  project is not. Source maps name the same files as `tsc`'s; their mappings are coarser.
+- **Known gaps.** `tsc` compiles every project file an import leads to. `kite build`
+  follows relative imports, `paths` and `baseUrl`, in source and declaration files, but
+  not an import by package name that leads to a workspace package's sources, and it
+  resolves a folder only to its `index` file, not through the folder's own
+  `package.json`. Source maps name the same files as `tsc`'s; their mappings are coarser.
 
 ## Commands
 

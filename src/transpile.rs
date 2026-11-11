@@ -222,8 +222,14 @@ impl<'a> Visit<'a> for Scan {
     }
 
     fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
-        if let Expression::StringLiteral(source) = &it.source {
-            self.names(it.span(), source.value.as_str(), true);
+        // tsc follows a plain string however it is quoted, a template with no holes included.
+        match &it.source {
+            Expression::StringLiteral(source) => self.names(it.span(), source.value.as_str(), true),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
+                let cooked = template.quasis.first().and_then(|quasi| quasi.value.cooked.as_ref());
+                self.names(it.span(), cooked.and_then(|text| text.as_str()), true);
+            }
+            _ => {}
         }
         walk::walk_import_expression(self, it);
     }
@@ -341,6 +347,30 @@ fn reference_paths(source: &str) -> Vec<String> {
     found
 }
 
+/// What a declaration file names. It emits nothing itself, but tsc compiles the project
+/// files it imports like any others.
+pub fn scan_declaration(path: &Path, source: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::d_ts()).parse();
+    if parsed.fatal_error {
+        let detail = parsed
+            .diagnostics
+            .first()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "syntax error".to_string());
+        return Err(format!("{}: {detail}", path.display()));
+    }
+    let mut scan = Scan {
+        esnext: true,
+        ambient: 1,
+        refused: None,
+        specifiers: Vec::new(),
+        import_meta: false,
+    };
+    scan.visit_program(&parsed.program);
+    Ok((scan.specifiers, reference_paths(source)))
+}
+
 /// Compiles one TypeScript source file. `path` is used for messages and to tell `.mts`
 /// from `.ts`.
 pub fn transpile(path: &Path, source: &str, options: Options) -> Result<Output, String> {
@@ -382,10 +412,11 @@ pub fn transpile(path: &Path, source: &str, options: Options) -> Result<Output, 
     }
     // What tsc goes by, read before anything is removed.
     let is_module = options.force_module || scan.import_meta || program.body.iter().any(is_module_statement);
+    // tsc goes by what the directive says once its escapes are read.
     let strict_already = program
         .directives
         .iter()
-        .any(|directive| directive.directive == "use strict");
+        .any(|directive| directive.expression.value.as_str() == Some("use strict"));
     let hashbang = program.hashbang.is_some();
 
     settle_empty_module_statements(&mut program, options.verbatim_module_syntax);
@@ -745,5 +776,25 @@ mod tests {
                 .to_string()
         };
         assert_eq!(mappings(&strict), format!(";{}", mappings(&plain)));
+    }
+
+    #[test]
+    fn template_imports_declaration_files_and_escaped_directives_follow_tsc() {
+        // A template with no holes is a plain string to tsc; one with holes names nothing.
+        let dynamic =
+            "export const a = () => import(`./tpl.js`);\nexport const b = (n: string) => import(`./${n}.js`);\n";
+        assert_eq!(
+            transpile(Path::new("src/a.ts"), dynamic, VERBATIM).unwrap().specifiers,
+            ["./tpl.js"]
+        );
+
+        // A declaration file's imports count, and nothing in it is refused.
+        let declared = "import type { G } from \"./from-dts.js\";\ndeclare global { enum E { A } }\nexport type H = G | import(\"./other.js\").O;\n";
+        let (specifiers, references) = scan_declaration(Path::new("src/globals.d.ts"), declared).unwrap();
+        assert_eq!(specifiers, ["./from-dts.js", "./other.js"]);
+        assert!(references.is_empty());
+
+        // An escaped spelling counts as the directive, as tsc reads it: nothing is added.
+        assert!(!js("\"use\\x20strict\";\nconst x: number = 1;\n").contains("\"use strict\""));
     }
 }

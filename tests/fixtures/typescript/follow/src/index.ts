@@ -6,3 +6,5 @@ import "./plain.js";
 
 export const all: OnlyType = [fromUtil, mapped, excluded];
 export type Lazy = typeof import("./lazy-type.js");
+export const later = () => import(`./tpl.js`);
+export const fromGlobal = globalThis.kiteGlobal;

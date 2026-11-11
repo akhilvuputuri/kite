@@ -19,13 +19,17 @@ pub struct Project {
     pub options: Options,
     /// `module` is a Node mode, where a file's package decides whether it is an ES module.
     pub node_modules_format: bool,
+    /// `moduleDetection` is `auto`, under which an `.mts` file is a module by its name.
+    pub auto_detection: bool,
     /// `baseUrl`, which bare module names may be relative to.
     pub base_url: Option<PathBuf>,
     /// `paths`: each pattern with the absolute patterns it maps to. Both may hold one `*`.
     pub paths: Vec<(String, Vec<PathBuf>)>,
-    /// The files `files` and `include` select, absolute and sorted, declaration files
-    /// left out. tsc also compiles the project files these import.
+    /// The files `files` and `include` select, absolute and sorted. tsc also compiles the
+    /// project files these import.
     pub files: Vec<PathBuf>,
+    /// The declaration files among them: they emit nothing, but their imports count.
+    pub declarations: Vec<PathBuf>,
 }
 
 /// A pattern or path together with the folder of the config that wrote it.
@@ -370,13 +374,7 @@ fn select_files(raw: &Raw, config_dir: &Path, out_dir: &Path) -> Vec<PathBuf> {
     for entry in raw.files.iter().flatten() {
         chosen.insert(place(entry));
     }
-    chosen
-        .into_iter()
-        .filter(|file| {
-            file.file_name()
-                .is_some_and(|name| !is_declaration(&name.to_string_lossy()))
-        })
-        .collect()
+    chosen.into_iter().collect()
 }
 
 /// Loads `config` and decides what `kite build` would write, or says why it cannot.
@@ -503,14 +501,20 @@ pub fn load_project(config: &Path, skip_declarations: bool) -> Result<Project, S
             paths.push((pattern.clone(), targets));
         }
     }
-    let files = select_files(&raw, &config_dir, &out_dir);
-    if files.is_empty() {
+    let (declarations, files): (Vec<PathBuf>, Vec<PathBuf>) =
+        select_files(&raw, &config_dir, &out_dir).into_iter().partition(|file| {
+            file.file_name()
+                .is_some_and(|name| is_declaration(&name.to_string_lossy()))
+        });
+    if files.is_empty() && declarations.is_empty() {
         return Err(format!(
             "{shown}: no TypeScript files match this project's files and include"
         ));
     }
+    // A composite project's sources are laid out from the config's folder unless it says otherwise.
+    let root_dir = dir_of("rootDir").or_else(|| flag("composite").then(|| config_dir.clone()));
     Ok(Project {
-        root_dir: dir_of("rootDir"),
+        root_dir,
         out_dir,
         options: Options {
             verbatim_module_syntax: verbatim,
@@ -522,9 +526,11 @@ pub fn load_project(config: &Path, skip_declarations: bool) -> Result<Project, S
             inline_sources: flag("inlineSources"),
         },
         node_modules_format,
+        auto_detection: detection == "auto",
         base_url,
         paths,
         files,
+        declarations,
     })
 }
 

@@ -19,7 +19,8 @@
   CommonJS output, `using` and `accessor` below target ESNext, and targets below ES2022.
   Declaration files still need `tsc`; `--skip-declarations` builds the JavaScript alone.
 - Not followed: an import by package name that leads to a workspace package's sources,
-  unless `paths` or `baseUrl` maps it.
+  unless `paths` or `baseUrl` maps it, and a folder import that its own `package.json`
+  points somewhere other than `index`.
 - New CI check: fixture projects are compiled with `tsc` 5.9.3 and with `kite build` and
   compared by syntax tree.
 - The binary grows from about 2.4 MB to about 5.7 MB (macOS arm64), for the TypeScript
