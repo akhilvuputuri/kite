@@ -1,4 +1,5 @@
 mod bins;
+mod build;
 mod collate;
 mod config;
 mod extract;
@@ -17,12 +18,14 @@ mod run;
 mod scripts;
 mod semver;
 mod store;
+mod transpile;
+mod tsconfig;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-kite — install and run JavaScript packages from package-lock.json
+kite — install and run JavaScript packages from package-lock.json, and build TypeScript
 
 Usage:
   kite [options] ci [--omit=dev|optional|peer]... [--ignore-scripts]
@@ -32,6 +35,7 @@ Usage:
   kite [options] run [--silent] [--if-present] [--ignore-scripts] <script> [--] [args...]
   kite [options] test [args...]        (also: start)
   kite [options] exec <bin> [--] [args...]
+  kite [options] build [--project <tsconfig or folder>] [--skip-declarations]
   kite --version
 
 Options (before or after the command):
@@ -101,6 +105,27 @@ fn real_main() -> Result<u8, String> {
     };
 
     match command.as_str() {
+        "build" => {
+            let mut project = None;
+            let mut skip_declarations = false;
+            while let Some(arg) = args.next() {
+                if global_option(&mut g, &arg, &mut args)? {
+                    continue;
+                }
+                match arg.split('=').next().unwrap_or("") {
+                    "--project" | "-p" => project = Some(PathBuf::from(value(&arg, &mut args)?)),
+                    "--skip-declarations" => skip_declarations = true,
+                    _ => return Err(format!("unknown argument {arg:?} for build")),
+                }
+            }
+            build::build(&build::BuildOptions {
+                start: project_dir(&g)?,
+                project,
+                skip_declarations,
+                jobs: g.jobs.unwrap_or_else(pool::default_jobs),
+                quiet: g.quiet,
+            })
+        }
         "ci" | "clean-install" => {
             let mut omit = install::Omit::default();
             let mut include = (false, false, false);

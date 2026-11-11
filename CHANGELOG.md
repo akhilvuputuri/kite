@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0
+
+- New command `kite build`: compiles a TypeScript project to JavaScript from its
+  `tsconfig.json`, without type checking. The output has the same syntax tree as `tsc`'s;
+  layout and comments differ. On one 232-file project it takes 23 ms against 3.5 s for
+  `tsc --noCheck`.
+- It reads `extends`, `files`, `include`, `exclude`, `rootDir`, `outDir`, `target`, `module`,
+  `verbatimModuleSyntax`, `isolatedModules`, `removeComments`, `sourceMap`, `inlineSourceMap`
+  and `inlineSources`. An unchanged build rewrites no files.
+- It refuses what it cannot show matches `tsc`, naming the file and line: enums, namespaces,
+  decorators, JSX, `import =`, `export =`, JSON imports, CommonJS output, `using` and
+  `accessor` below target ESNext, and targets below ES2022. Declaration files still need
+  `tsc`; `--skip-declarations` builds the JavaScript alone.
+- New CI check: fixture projects are compiled with `tsc` 5.9.3 and with `kite build` and
+  compared by syntax tree.
+- The binary grows from about 2.4 MB to about 5.6 MB (macOS arm64), for the TypeScript
+  parser and printer.
+
 ## 0.1.3
 
 - Multi-step Docker builds work on Docker's containerd image store (the default for a fresh

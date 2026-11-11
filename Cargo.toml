@@ -1,9 +1,9 @@
 [package]
 name = "kite-pm"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
-description = "A fast, npm-compatible JavaScript package manager: install, resolve and run with byte-identical npm results"
+description = "A fast, npm-compatible JavaScript package manager: install, resolve and run with byte-identical npm results, and build TypeScript"
 license = "MIT"
 repository = "https://github.com/akhilvuputuri/kite"
 publish = false
@@ -16,6 +16,7 @@ path = "src/main.rs"
 base64 = "0.22"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
+oxc = { version = "0.158.0", default-features = false, features = ["ast_visit", "codegen", "semantic", "transformer"] }
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"

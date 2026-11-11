@@ -56,6 +56,25 @@ jobs:
         if: failure()
         run: head -200 "${{ runner.temp }}/parity/${{ matrix.fixture }}.diff" || true
 
+  typescript:
+    name: tsc build parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    env:
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+      PARITY_WORK: ${{ runner.temp }}/build-parity
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Build the release binary (static musl on Linux)
+        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - name: tsc vs kite build, by syntax tree
+        run: harness/build-parity.sh "$BIN"
+
   resolve:
     name: npm resolution parity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
