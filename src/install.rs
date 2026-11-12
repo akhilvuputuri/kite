@@ -185,7 +185,7 @@ fn remove_contents(dir: &Path) -> io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            fs::remove_dir_all(&path)?;
+            remove_dir_tree(&path)?;
         } else {
             fs::remove_file(&path)?;
         }
@@ -977,10 +977,28 @@ fn remove_contents_except(dir: &Path, keep: &str) -> io::Result<()> {
 
 fn remove_path(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(path),
+        Ok(m) if m.is_dir() => remove_dir_tree(path),
         Ok(_) => fs::remove_file(path),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// Removes a folder and everything in it. Another program can add a file while this runs
+/// (Finder writes `.DS_Store`), which fails the removal with "Directory not empty", so it
+/// is tried again.
+fn remove_dir_tree(path: &Path) -> io::Result<()> {
+    retry_not_empty(|| fs::remove_dir_all(path))
+}
+
+/// Runs `remove` up to five times while it fails because the folder is not empty.
+fn retry_not_empty(mut remove: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut retries = 4;
+    loop {
+        match remove() {
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty && retries > 0 => retries -= 1,
+            result => return result,
+        }
     }
 }
 
@@ -1108,7 +1126,37 @@ fn normalize_bin(pkg: &mut Map<String, Value>, folder_name: &str) {
 
 #[cfg(test)]
 mod incremental_tests {
-    use super::in_node_modules;
+    use super::{in_node_modules, retry_not_empty};
+    use std::io;
+
+    #[test]
+    fn a_folder_refilled_during_removal_is_removed_again() {
+        let not_empty = || io::Error::from(io::ErrorKind::DirectoryNotEmpty);
+
+        let mut calls = 0;
+        let twice = retry_not_empty(|| {
+            calls += 1;
+            if calls < 3 { Err(not_empty()) } else { Ok(()) }
+        });
+        assert!(twice.is_ok());
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let always = retry_not_empty(|| {
+            calls += 1;
+            Err(not_empty())
+        });
+        assert_eq!(always.unwrap_err().kind(), io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(calls, 5);
+
+        let mut calls = 0;
+        let denied = retry_not_empty(|| {
+            calls += 1;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn removal_never_targets_project_folders() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `kite ci` and `kite install` no longer fail with "Directory not empty" when another
+  program adds a file to a folder while it is being removed, as Finder does with
+  `.DS_Store`. The removal is tried again, up to five times.
+
 ## 0.2.0
 
 - New command `kite build`: compiles a TypeScript project to JavaScript from its
