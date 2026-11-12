@@ -28,8 +28,33 @@ jobs:
       - run: cargo clippy --locked --release -- -D warnings
       - run: cargo test --locked
 
+  # Built once per platform and handed to every job below: each of them used to spend
+  # most of its time on the same release build.
+  build:
+    name: release binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the release binary (static musl on Linux)
+        run: |
+          bin=$(harness/build.sh)
+          mkdir -p dist
+          cp "$bin" dist/kite
+          dist/kite --version
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kite-${{ matrix.os }}
+          path: dist/kite
+          if-no-files-found: error
+          retention-days: 3
+
   parity:
     name: npm parity ${{ matrix.fixture }} ${{ matrix.flags }} (${{ matrix.os }})
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -41,8 +66,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
-      - name: Build the release binary (static musl on Linux)
-        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-${{ matrix.os }}", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
       - name: npm ci vs kite ci
         env:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
@@ -56,8 +83,31 @@ jobs:
         if: failure()
         run: head -200 "${{ runner.temp }}/parity/${{ matrix.fixture }}.diff" || true
 
+  typescript:
+    name: tsc build parity (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/../npm-cache
+      PARITY_WORK: ${{ github.workspace }}/../build-parity
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-${{ matrix.os }}", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
+      - name: tsc vs kite build, by syntax tree
+        run: harness/build-parity.sh "$BIN"
+
   resolve:
     name: npm resolution parity (${{ matrix.os }})
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -71,8 +121,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
-      - name: Build the release binary (static musl on Linux)
-        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-${{ matrix.os }}", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
       - name: Differential fuzzing (node-semver, ICU collation)
         run: node harness/fuzz.mjs "$BIN" 50000
       - name: Resolve like npm install --package-lock-only
@@ -118,6 +170,7 @@ jobs:
 
   install-generated:
     name: npm ci parity on generated lockfiles (${{ matrix.os }})
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -131,8 +184,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
-      - name: Build the release binary (static musl on Linux)
-        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-${{ matrix.os }}", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
       - name: Lock each fixture with npm, then compare npm ci and kite ci
         run: |
           failed=0
@@ -152,11 +207,14 @@ jobs:
 
   docker-layers:
     name: Docker image layers (containerd snapshotter, legacy builder)
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Build the release binary (static musl)
-        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-ubuntu-24.04", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
       # A fresh Docker 29 install (such as Chief's host) uses the containerd
       # image store, whose overlay mounts cannot rename lower-layer folders.
       - name: Use the containerd image store
@@ -176,6 +234,7 @@ jobs:
 
   install-incremental:
     name: npm install parity (${{ matrix.os }})
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -188,8 +247,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "${{ env.NODE_VERSION }}" }
-      - name: Build the release binary (static musl on Linux)
-        run: echo "BIN=$(harness/build.sh)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: "kite-${{ matrix.os }}", path: "${{ runner.temp }}/kite-bin" }
+      - name: Use the binary built once for this platform
+        run: chmod +x "$RUNNER_TEMP/kite-bin/kite" && echo "BIN=$RUNNER_TEMP/kite-bin/kite" >> "$GITHUB_ENV"
       - name: Incremental installs match npm install
         run: |
           I=harness/install-parity.sh

@@ -6,6 +6,9 @@ kite installs, resolves and runs JavaScript projects using npm's own `package-lo
 Unlike other npm alternatives, it does not convert your lockfile or build a "similar" tree.
 It produces **exactly** what npm 10 produces, byte for byte, and gets there faster.
 
+It also builds TypeScript: `kite build` writes the JavaScript `tsc` would write for the
+project, without type checking, in milliseconds.
+
 ```sh
 kite ci                      # npm ci
 kite install                 # npm install
@@ -15,6 +18,7 @@ kite update [pkg...]         # npm update
 kite run build -- --watch    # npm run build -- --watch
 kite test                    # npm test
 kite exec tsc --noEmit       # npx tsc --noEmit
+kite build                   # tsc, JavaScript only, no type check
 ```
 
 ## Install
@@ -101,11 +105,62 @@ Linux arm64 and macOS:
   identical `ERESOLVE` refusals where npm refuses.
 - **Semantics.** `harness/fuzz.mjs` compares kite's semver engine with node-semver and its
   key ordering with Node's ICU collator, over tens of thousands of random cases.
+- **TypeScript builds.** `harness/build-parity.sh` compiles fixture projects with `tsc`
+  and with `kite build`, then compares the JavaScript by syntax tree and the source maps by
+  the files they name. The fixtures cover classes, parameter properties, type-only
+  imports and exports, import elision, scripts and forced modules, files reached only
+  through imports, `extends`, `paths` and both module settings. The script first checks
+  that the comparison itself tells equal code from different code.
 
 kite follows npm down to its quirks: arborist's placement and peer-set rules, the
 order-dependent dev/optional flag calculation, pacote's file modes and `.gitignore` renaming,
 bin-links' conflict order and CRLF shebang fix, the lifecycle script phases, and the validation
 `npm ci` uses to reject an out-of-sync lockfile.
+
+## Building TypeScript
+
+`kite build` reads the project's `tsconfig.json` and writes the JavaScript `tsc` would
+write: the same files in `outDir`, with the same syntax tree. It does not check types and
+writes no declaration files, so keep `tsc --noEmit` for checking.
+
+```sh
+kite build                              # the tsconfig.json here or in a folder above
+kite build --project packages/api       # another project, or a tsconfig file
+kite build --project lib --skip-declarations
+```
+
+On one 232-file, 124,000-line project it takes 27 ms against 1.7 s for
+`tsc --noCheck` (Apple M4, medians of 11 and 5 runs). An unchanged build rewrites no
+files, and a build that is refused writes nothing.
+
+- **What "the same" means.** Layout and comments differ; the code does not. CI compiles
+  fixture projects with `tsc` 5.9.3 and with `kite build` and compares each pair of files
+  as syntax trees (`harness/build-parity.sh`). Three spellings count as equal:
+  `import {} from "x"` and `import "x"`, `{ a: a }` and `{ a }`, and a single statement
+  with or without braces around it.
+- **What it compiles.** Syntax that erases to the JavaScript underneath, plus
+  constructor parameter properties, for `target` ES2022 or later and ES module output
+  (`module` ES2015 to ESNext, or a Node setting). Like `tsc`, it also compiles the
+  project files that the selected files import, drops imports only used as types unless
+  `verbatimModuleSyntax` is on, ends a module that has nothing left to import or export
+  with `export {}`, and opens a script with `"use strict"` under `strict`.
+- **What it reads.** `extends` (paths, packages and lists), `files`, `include`, `exclude`,
+  `${configDir}`, `rootDir` (worked out from the sources when unset), `outDir`, `target`,
+  `module`, `moduleDetection`, `strict`, `alwaysStrict`, `verbatimModuleSyntax`,
+  `isolatedModules`, `removeComments`, `baseUrl`, `paths`, `sourceMap`, `inlineSourceMap`
+  and `inlineSources`.
+- **What it refuses.** Anything `tsc` would turn into different JavaScript, with the
+  file and line: enums, namespaces, decorators, JSX, `import =` and `export =`, JSON
+  imports, exports of `declare`d names, CommonJS output, `module` Preserve, and `using`
+  or `accessor` below `target` ESNext. A project must set `outDir`, and
+  `isolatedModules` or `verbatimModuleSyntax`, so that every file compiles on its own.
+  Declaration files need `tsc`; `--skip-declarations` says the JavaScript alone is
+  wanted.
+- **Known gaps.** `tsc` compiles every project file an import leads to. `kite build`
+  follows relative imports, `paths` and `baseUrl`, in source and declaration files, but
+  not an import by package name that leads to a workspace package's sources, and it
+  resolves a folder only to its `index` file, not through the folder's own
+  `package.json`. Source maps name the same files as `tsc`'s; their mappings are coarser.
 
 ## Commands
 
@@ -118,6 +173,7 @@ bin-links' conflict order and CRLF shebang fix, the lifecycle script phases, and
 | `run <script> [--] [args...]` | Run a `package.json` script with npm's environment, `PATH`, pre/post scripts and exit codes |
 | `test`, `start` | Shortcuts for `run test` and `run start` |
 | `exec <bin> [--] [args...]` | Run a binary from `node_modules/.bin` |
+| `build [--project PATH] [--skip-declarations]` | Compile a TypeScript project to JavaScript from its `tsconfig.json`, without type checking |
 
 Global options: `--prefix DIR` (or `-C DIR`), `--store DIR` (default `$KITE_STORE` or the
 user cache directory), `--jobs N` (CPU work), `--quiet`. `KITE_NETWORK_CONCURRENCY` sets how many
@@ -132,7 +188,9 @@ guessing:
 - registries other than registry.npmjs.org, and `.npmrc` settings;
 - git, tarball-URL and `file:` tarball dependencies;
 - packages that ship `bundleDependencies` or `npm-shrinkwrap.json`;
-- `publish`, `audit` and other npm commands outside install and run.
+- `publish`, `audit` and other npm commands outside install and run;
+- in `kite build`: enums, namespaces, decorators, JSX, CommonJS output, declaration files
+  and targets below ES2022.
 
 ## Notes
 

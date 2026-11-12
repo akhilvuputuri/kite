@@ -1,7 +1,7 @@
 name: release
 # Pushing a tag vX.Y.Z builds the binaries, proves them, and publishes a
 # GitHub release with SHA-256 checksums. Nothing is published unless every
-# platform builds reproducibly and matches npm on the parity fixtures.
+# platform builds reproducibly and matches npm and tsc on the parity fixtures.
 on:
   push:
     tags: ["v*.*.*"]
@@ -101,6 +101,7 @@ jobs:
             harness/parity.sh "tests/fixtures/$fx" "$bin" --omit=dev
           done
           RESOLVE_DROP_LOCK=1 harness/resolve-parity.sh tests/fixtures/chief "$bin" fresh-chief install
+          harness/build-parity.sh "$bin"
       - name: Benchmark against npm, pnpm and Bun
         # Informational: an outage of a comparison tool must not block a release.
         continue-on-error: true
